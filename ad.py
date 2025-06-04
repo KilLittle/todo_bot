@@ -49,12 +49,12 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             username VARCHAR(50) PRIMARY KEY,
             role VARCHAR(20) NOT NULL,
-            name VARCHAR(100),
+            full_name VARCHAR(100),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """,
         f"""
-        INSERT INTO users (username, role, name)
+        INSERT INTO users (username, role, full_name)
         VALUES ('{ADMIN_USERNAME}', 'admin', 'Главный администратор')
         ON CONFLICT (username) DO NOTHING
         """
@@ -92,8 +92,6 @@ class ScheduleStates(StatesGroup):
     WAITING_PRACTICE_DESC = State()
     WAITING_TEACHER = State()
     CONFIRMATION = State()
-    CONFIRM_TEACHER = State()
-
 
 
 @dp.message(F.text == "📅 Добавить расписание")
@@ -104,19 +102,14 @@ async def cmd_add_schedule(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    # ИСПРАВИТЬ: использовать ReplyKeyboardMarkup с KeyboardButton
-    keyboard = types.ReplyKeyboardMarkup(
-        keyboard=[
-            [types.KeyboardButton(text="Отмена")]
-        ],
-        resize_keyboard=True
-    )
+
 
     await message.answer(
         "Введите название семестра (например: 'Осенний семестр 2025'):",
-        reply_markup=keyboard
+
     )
     await state.set_state(ScheduleStates.WAITING_SEMESTER_NAME)
+
 
 
 
@@ -182,7 +175,7 @@ async def get_teachers_list() -> list[tuple]:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
-            SELECT username, name 
+            SELECT username,full_name 
             FROM users 
             WHERE role = 'teacher' 
             ORDER BY username
@@ -200,28 +193,26 @@ async def get_teachers_list() -> list[tuple]:
 
 @dp.message(ScheduleStates.WAITING_PRACTICE_DESC)
 async def process_practice_desc(message: types.Message, state: FSMContext):
-    """Обрабатывает описание практики"""
+    """Обрабатывает описание практики и переходит к выбору преподавателя"""
     practice_desc = None if message.text == "-" else message.text
     await state.update_data(practice_description=practice_desc)
 
-    # Получаем список преподавателей
     teachers = await get_teachers_list()
     if not teachers:
-        await message.answer("❌ Список преподавателей пуст", reply_markup=None)
-        await state.set_state(ScheduleStates.CONFIRMATION)
+        await message.answer("❌ Нет доступных преподавателей", reply_markup=types.ReplyKeyboardRemove())
+        await state.clear()
         return
 
-    # Создаем кнопки только из username
-    teacher_buttons = []
-    for t in teachers[:5]:
-        teacher_buttons.append(types.KeyboardButton(text=t[0]))  # Используем только username
+    # Создаем inline-клавиатуру для выбора преподавателя
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{full_name} (@{username})", callback_data=f"teacher_{username}")]
+        for username, full_name in teachers
+    ])
 
-    keyboard = types.ReplyKeyboardMarkup(
-        keyboard=[teacher_buttons],
-        resize_keyboard=True
+    await message.answer(
+        "👨‍🏫 Выберите преподавателя:",
+        reply_markup=keyboard
     )
-
-    await message.answer("Выберите преподавателя:", reply_markup=keyboard)
     await state.set_state(ScheduleStates.WAITING_TEACHER)
 
 
@@ -238,13 +229,13 @@ async def inline_teacher_search(inline_query: types.InlineQuery):
     results = [
         InlineQueryResultArticle(
             id=username,
-            title=name,
+            title=full_name,
             input_message_content=InputTextMessageContent(
                 message_text=f"Выбран преподаватель: {name}"
             )
         )
-        for username, name in teachers
-        if query in name.lower() or query in username.lower()
+        for username, full_name in teachers
+        if query in full_name.lower() or query in username.lower()
     ]
 
 
@@ -252,48 +243,23 @@ async def inline_teacher_search(inline_query: types.InlineQuery):
     await inline_query.answer(results)
 
 
-@dp.message(ScheduleStates.CONFIRM_TEACHER)
-async def confirm_teacher(message: types.Message, state: FSMContext):
-    """Подтверждает выбор преподавателя"""
-    # Извлекаем username из текста
-    if not message.text.startswith("(") or not message.text.endswith(")"):
-        await message.answer("❌ Некорректный формат выбора. Используйте цитату из inline-клавиатуры",
-                             reply_markup=types.ReplyKeyboardRemove())
+
+
+# Обработчик выбора преподавателя через inline-кнопки
+@dp.callback_query(ScheduleStates.WAITING_TEACHER, F.data.startswith("teacher_"))
+async def process_teacher_selection(callback: types.CallbackQuery, state: FSMContext):
+    """Обрабатывает выбор преподавателя из inline-клавиатуры"""
+    username = callback.data.split("_")[1]
+    teacher_data = next((t for t in await get_teachers_list() if t[0] == username), None)
+
+    if not teacher_data:
+        await callback.answer("❌ Преподаватель не найден")
         return
 
-    username_part = message.text[1:-1]  # Убираем скобки
-    username = username_part.split(", ")[0]  # Берем только username
-
-    if not await get_user_role_by_username(username):
-        await message.answer("❌ Преподаватель не найден. Выберите снова:", reply_markup=types.ReplyKeyboardRemove())
-        await process_teacher_selection(message, state)
-        return
-
+    username, full_name = teacher_data
     await state.update_data(responsible_teacher=username)
 
-    # ИСПРАВИТЬ: использовать KeyboardButton
-    confirm_keyboard = types.ReplyKeyboardMarkup(
-        keyboard=[
-            [types.KeyboardButton(text="✅ Да")],
-            [types.KeyboardButton(text="❌ Нет")]
-        ],
-        resize_keyboard=True
-    )
-
-    await message.answer(f"✅ Выбран преподаватель: @{username}", reply_markup=confirm_keyboard)
-
-
-@dp.message(ScheduleStates.WAITING_TEACHER)
-async def process_teacher_selection(message: types.Message, state: FSMContext):
-    """Обрабатывает ответственного преподавателя"""
-    teacher_username = message.text.lstrip('@')
-    if not await get_user_role_by_username(teacher_username):
-        await message.answer("❌ Преподаватель с таким username не найден. Введите снова:", reply_markup=types.ReplyKeyboardRemove())
-        return
-
-    await state.update_data(responsible_teacher=message.text)
-
-    # Формируем подтверждение
+    # Формируем подтверждение с данными
     data = await state.get_data()
     confirm_text = (
         "📋 Подтвердите данные расписания:\n\n"
@@ -302,23 +268,64 @@ async def process_teacher_selection(message: types.Message, state: FSMContext):
         f"Дата окончания: {data['end_date'].strftime('%d.%m.%Y')}\n"
         f"Практика: {data['practice_name']}\n"
         f"Описание: {data['practice_description'] or 'не указано'}\n"
-        f"Ответственный: @{data['responsible_teacher']}\n\n"
+        f"Ответственный: {name} (@{username})\n\n"
         "Всё верно?"
     )
 
-    # ИСПРАВИТЬ: использовать KeyboardButton
-    reply_markup = types.ReplyKeyboardMarkup(
-        keyboard=[
-            [types.KeyboardButton(text="✅ Да"), types.KeyboardButton(text="❌ Нет")]
-        ],
-        resize_keyboard=True
-    )
+    # Создаем inline-клавиатуру для подтверждения
+    confirm_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_schedule"),
+            InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_schedule")
+        ]
+    ])
 
-    await message.answer(confirm_text, reply_markup=reply_markup)
+    await callback.message.edit_text(confirm_text, reply_markup=confirm_keyboard)
     await state.set_state(ScheduleStates.CONFIRMATION)
+    await callback.answer()
 
 
+# Обработчики подтверждения/отмены через inline-кнопки
+@dp.callback_query(ScheduleStates.CONFIRMATION, F.data == "confirm_schedule")
+async def confirm_schedule(callback: types.CallbackQuery, state: FSMContext):
+    """Обрабатывает подтверждение создания расписания"""
+    data = await state.get_data()
 
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO schedule 
+            (semester_name, start_date, end_date, practice_name, practice_description, responsible_teacher, created_by) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (
+                data['semester_name'],
+                data['start_date'],
+                data['end_date'],
+                data['practice_name'],
+                data['practice_description'],
+                data['responsible_teacher'],
+                callback.from_user.username
+            )
+        )
+        conn.commit()
+
+        await callback.message.edit_text(
+            "✅ Расписание успешно добавлено!\n\n"
+            "Вы можете добавить ещё одно расписание или вернуться в меню /start",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+    except Error as e:
+        await callback.message.edit_text(
+            "❌ Ошибка при сохранении расписания",
+            reply_markup=None
+        )
+        print(f"Ошибка сохранения расписания: {e}")
+    finally:
+        if conn:
+            conn.close()
+        await state.clear()
+    await callback.answer()
 
 @dp.message(ScheduleStates.CONFIRMATION)
 async def process_confirmation(message: types.Message, state: FSMContext):
@@ -366,19 +373,27 @@ async def process_confirmation(message: types.Message, state: FSMContext):
         if conn:
             conn.close()
         await state.clear()
+@dp.callback_query(ScheduleStates.CONFIRMATION, F.data == "cancel_schedule")
+async def cancel_schedule(callback: types.CallbackQuery, state: FSMContext):
+    """Обрабатывает отмену создания расписания"""
+    await callback.message.edit_text(
+        "❌ Добавление расписания отменено",
+        reply_markup=None
+    )
+    await state.clear()
+    await callback.answer()
 
 
 
-
-async def add_user_to_db(username: str, role: str, name: str):
+async def add_user_to_db(username: str, role: str, full_name: str):
     """Добавление пользователя в БД"""
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO users (username, role, name) VALUES (%s, %s, %s) ON CONFLICT (username) DO UPDATE SET role = EXCLUDED.role, name = EXCLUDED.name",
-            (username, role, name)
+            "INSERT INTO users (username, role, full_name) VALUES (%s, %s, %s) ON CONFLICT (username) DO UPDATE SET role = EXCLUDED.role, full_name = EXCLUDED.full_name",
+            (username, role, full_name)
         )
         conn.commit()
         cur.close()
@@ -396,7 +411,7 @@ async def get_all_users():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT username, role, name FROM users ORDER BY created_at DESC")
+        cur.execute("SELECT username, role, full_name FROM users ORDER BY created_at DESC")
         users = cur.fetchall()
         cur.close()
         return users
@@ -536,8 +551,8 @@ async def finish_add_user(message: types.Message, state: FSMContext):
         return
 
     # Добавляем пользователя в БД
-    name = message.from_user.first_name or "Анонимный пользователь"
-    success = await add_user_to_db(username, role, name)
+    full_name = message.from_user.first_name or "Анонимный пользователь"
+    success = await add_user_to_db(username, role, full_name)
 
     if not success:
         await message.answer("❌ Ошибка при добавлении пользователя в базу данных",
@@ -577,7 +592,7 @@ async def get_user_role_by_username(username: str):
 
 @dp.message(F.text == "👀 Просмотреть пользователей")
 async def cmd_view_users(message: types.Message):
-    """Показать всех пользователей (исправленная версия)"""
+    """Показать всех пользователей без кнопки обновления"""
     if message.from_user.username != ADMIN_USERNAME:
         await message.answer("❌ Доступно только администратору")
         return
@@ -597,9 +612,6 @@ async def cmd_view_users(message: types.Message):
 
     await message.answer(
         content,
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_users")]]
-        ),
         parse_mode=ParseMode.HTML
     )
 
@@ -608,12 +620,7 @@ async def cmd_view_users(message: types.Message):
 
 
 
-@dp.callback_query(F.data == "refresh_users")
-async def callback_refresh_users(call: types.CallbackQuery):
-    """Кнопка обновления списка пользователей"""
-    await call.answer()
-    await cmd_view_users(await bot.send_message(call.message.chat.id, reply_markup=None))
-    await call.message.delete()
+
 
 
 # Запуск бота
