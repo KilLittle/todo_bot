@@ -44,42 +44,7 @@ def get_db_connection():
         return None
 
 
-def init_db():
-    """Инициализация таблиц при первом запуске"""
-    commands = (
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            username VARCHAR(50) PRIMARY KEY,
-            role VARCHAR(20) NOT NULL,
-            full_name VARCHAR(100),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            chat_id BIGINT UNIQUE  -- Добавляем новое поле
-        )
-        """,
-        f"""
-        INSERT INTO users (username, role, full_name, chat_id)
-        VALUES ('{ADMIN_USERNAME}', 'admin', 'Главный администратор', 0)
-        ON CONFLICT (username) DO NOTHING
-        """
-    )
 
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        for command in commands:
-            cur.execute(command)
-        conn.commit()
-        cur.close()
-    except Error as e:
-        print(f"Ошибка инициализации БД: {e}")
-    finally:
-        if conn is not None:
-            conn.close()
-
-
-# Инициализируем БД при старте
-init_db()
 
 
 # Состояния FSM для добавления пользователей
@@ -101,6 +66,12 @@ class ScheduleDistribution(StatesGroup):
 class ApplicationStates(StatesGroup):
     WAITING_APPLICATION_FILE = State()
     WAITING_APPLICATION_CONFIRM = State()
+
+# Добавляем новое состояние для процесса назначения руководителя
+class AssignTeacherStates(StatesGroup):
+    WAITING_STUDENT_SELECTION = State()
+    WAITING_TEACHER_SELECTION = State()
+    CONFIRM_ASSIGNMENT = State()
 
 @dp.message(F.text == "📅 Добавить расписание")
 async def cmd_add_schedule(message: types.Message, state: FSMContext):
@@ -477,7 +448,7 @@ async def cmd_start(message: types.Message):
     user_role = await get_user_role_by_username(message.from_user.username)
 
     # Общая кнопка для всех ролей
-    common_buttons = [types.KeyboardButton(text="📋 Посмотреть расписание")]
+    common_buttons = [types.KeyboardButton(text="📋 Посмотреть расписание")], [KeyboardButton(text="🚀 /start")]
 
     # Администратор
     if message.from_user.username == ADMIN_USERNAME:
@@ -525,7 +496,8 @@ async def cmd_start(message: types.Message):
                 [
                     types.KeyboardButton(text="📋 Посмотреть расписание"),
                     types.KeyboardButton(text="👨‍🏫 Мой преподаватель")
-                ]
+                ],
+                [types.KeyboardButton(text="📄 Подать заявление")]
             ],
             resize_keyboard=True
         )
@@ -533,6 +505,26 @@ async def cmd_start(message: types.Message):
             await message.answer(f"📋 Привет! Ваша роль: {user_role}", reply_markup=markup)
         else:
             await message.answer("❌ Вы не зарегистрированы в системе", reply_markup=markup)
+
+
+@dp.message(F.text == "⚙️ Настройки")
+async def settings_menu(message: types.Message):
+    """Меню настроек с кнопкой старт"""
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="👤 Профиль")],
+            [KeyboardButton(text="🔔 Уведомления")],
+            [KeyboardButton(text="/start")],  # Кнопка старт
+            [KeyboardButton(text="🔙 Главное меню")]
+        ],
+        resize_keyboard=True,
+        is_persistent=True
+    )
+
+    await message.answer(
+        "⚙️ Настройки системы:",
+        reply_markup=keyboard
+    )
 
 
 @dp.message(F.text == "➕ Добавить пользователя")
@@ -856,31 +848,629 @@ async def cancel_distribution(message: types.Message, state: FSMContext):
     await message.answer("❌ Рассылка отменена", reply_markup=types.ReplyKeyboardRemove())
     await state.clear()
 
+@dp.callback_query(F.data == "unassign_teacher_menu")
+async def unassign_teacher_menu(callback: types.CallbackQuery):
+    """Меню выбора студента для снятия преподавателя (только студенты с преподавателями)"""
+    students_with_teachers = await get_students_with_teachers_only()
+
+    if not students_with_teachers:
+        await callback.answer("ℹ️ Нет студентов с назначенными преподавателями")
+        return
+
+    # Формируем список с информацией о студентах и их преподавателях
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"👨‍🎓 {student_name} → 👨‍🏫 {teacher_name}",
+            callback_data=f"confirm_unassign_{student_username}"
+        )]
+        for student_username, student_name, _, teacher_name in
+        students_with_teachers
+    ] + [
+        [InlineKeyboardButton(
+            text="❌ Отмена",
+            callback_data="teacher_management"
+        )]
+    ])
+
+    await callback.message.edit_text(
+        "👨‍🎓 Выберите студента для снятия преподавателя:\n"
+        "(Формат: Студент → Текущий преподаватель)",
+        reply_markup=keyboard
+    )
+    await callback.answer()
 
 @dp.message(F.text == "👨‍🎓 Список студентов")
 async def show_all_students(message: types.Message):
-    students = await get_students_list()
+    """Показывает список студентов с кнопками для назначения преподавателя"""
+    user_role = await get_user_role_by_username(message.from_user.username)
+
+
+    students = await get_all_students_with_teachers()
 
     if not students:
-        await message.answer("❌ Нет студентов в базе")
+        await message.answer("📋 Список студентов пуст.")
         return
 
-    response = ["📊 <b>Полный список студентов:</b>", ""]
-    current_group = None
+    # Группировка по преподавателям
+    grouped = {}
+    for username, full_name, teacher_username, teacher_name in students:
+        key = teacher_name or "❌ Без преподавателя"
+        if key not in grouped:
+            grouped[key] = []
+        grouped[key].append((username, full_name))
 
-    for student in students:
-        if student[2] != current_group:
-            current_group = student[2]
-            response.append(f"\n🎓 <b>Группа {current_group}:</b>")
-        response.append(f"• {student[1]} (@{student[0]})")
+    # Формируем сообщение
+    response = ["📊 <b>Полный список студентов:</b>"]
+    for teacher, student_list in grouped.items():
+        response.append(f"\n👨‍🏫 <b>{teacher}</b>:")
+        for username, full_name in student_list:
+            response.append(f"• {full_name} (@{username})")
+
+    # Добавляем кнопки действий
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="🔄 Назначить преподавателя",
+                callback_data="assign_teacher_menu"
+            ),
+            InlineKeyboardButton(
+                text="❌ Снять преподавателя",
+                callback_data="unassign_teacher_menu"
+            ),
+            InlineKeyboardButton(
+                text="🔄 Обновить список",
+                callback_data="refresh_students"
+            )
+        ]
+    ])
 
     await message.answer(
         "\n".join(response),
         parse_mode="HTML",
-        reply_markup=types.ReplyKeyboardRemove()
+        reply_markup=keyboard
     )
 
 
+
+async def get_current_teacher(student_username: str) -> dict:
+    """Возвращает текущего преподавателя студента"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT u.username, u.full_name
+            FROM users u
+            JOIN student_teacher st ON u.username = st.teacher_username
+            WHERE st.student_username = %s
+        """, (student_username,))
+        result = cur.fetchone()
+        return {
+            'username': result[0],
+            'full_name': result[1]
+        } if result else None
+    except Error as e:
+        print(f"Ошибка получения преподавателя: {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+@dp.callback_query(F.data == "teacher_management")
+async def teacher_management(callback: types.CallbackQuery):
+    """Возврат в меню управления преподавателями"""
+    await show_all_students(callback.message)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("confirm_unassign_"))
+async def confirm_unassign(callback: types.CallbackQuery):
+    """Упрощенное подтверждение снятия преподавателя"""
+    try:
+        student_username = callback.data.split("_")[2]
+        print(f"[DEBUG] Подтверждение снятия для @{student_username}")
+
+        # Получаем данные один раз
+        student_info = await get_user_info(student_username)
+        current_teacher = await get_current_teacher(student_username)
+
+        if not student_info:
+            await callback.answer("❌ Студент не найден", show_alert=True)
+            return await callback.message.edit_text(
+                "❌ Студент не найден",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Назад", callback_data="teacher_management")
+                ]])
+            )
+
+        if not current_teacher:
+            await callback.answer("❌ Нет преподавателя", show_alert=True)
+            return await callback.message.edit_text(
+                f"ℹ️ У @{student_username} нет преподавателя",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Назад", callback_data="teacher_management")
+                ]])
+            )
+
+        # Формируем сообщение
+        text = (
+            f"⚠️ Подтвердите снятие преподавателя\n\n"
+            f"Студент: @{student_username}\n"
+            f"Преподаватель: {current_teacher['full_name']} (@{current_teacher['username']})"
+        )
+
+        # Простые кнопки подтверждения/отмены
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Снять",
+                    callback_data=f"execute_unassign_{student_username}"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data="teacher_management"
+                )
+            ]
+        ])
+
+        await callback.message.edit_text(text, reply_markup=markup)
+        await callback.answer()
+
+    except Exception as e:
+        print(f"[ERROR] Ошибка подтверждения: {str(e)}")
+        await callback.answer("❌ Ошибка подтверждения", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("execute_unassign_"))
+async def execute_unassign(callback: types.CallbackQuery):
+    """Фактическое снятие преподавателя"""
+    try:
+        student_username = callback.data.split("_")[2]
+
+        # Проверяем существование студента
+        student_info = await get_user_info(student_username)
+        if not student_info:
+            await callback.answer("❌ Студент не найден", show_alert=True)
+            return await callback.message.edit_text(
+                "❌ Студент не найден",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Назад", callback_data="teacher_management")
+                ]])
+            )
+
+        # Проверяем текущего преподавателя
+        current_teacher = await get_current_teacher(student_username)
+        if not current_teacher:
+            await callback.answer("ℹ️ У студента нет преподавателя", show_alert=True)
+            return await callback.message.edit_text(
+                f"ℹ️ У @{student_username} нет преподавателя",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Назад", callback_data="teacher_management")
+                ]])
+            )
+
+        # Удаляем связь из базы данных
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                DELETE FROM student_teacher 
+                WHERE student_username = %s
+                RETURNING 1
+            """, (student_username,))
+
+            if not cur.fetchone():
+                await callback.answer("❌ Не удалось снять преподавателя", show_alert=True)
+                return
+
+            conn.commit()
+
+            # Уведомляем студента
+            student_chat_id = await get_user_chat_id(student_username)
+            if student_chat_id:
+                try:
+                    await bot.send_message(
+                        chat_id=student_chat_id,
+                        text=f"ℹ️ С вас снят руководитель практики: {current_teacher['full_name']} (@{current_teacher['username']})"
+                    )
+                except Exception as e:
+                    print(f"Ошибка уведомления студента: {e}")
+
+            # Обновляем сообщение
+            await callback.message.edit_text(
+                f"✅ Преподаватель {current_teacher['full_name']} снят со студента @{student_username}\n"
+                f"Время: {datetime.now().strftime('%H:%M:%S')}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="В меню", callback_data="teacher_management")
+                ]])
+            )
+
+        except Error as e:
+            print(f"[DB ERROR] Ошибка снятия преподавателя: {e}")
+            await callback.message.edit_text(
+                "❌ Ошибка при снятии преподавателя",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Повторить", callback_data=f"confirm_unassign_{student_username}"),
+                    InlineKeyboardButton(text="Отмена", callback_data="teacher_management")
+                ]])
+            )
+        finally:
+            if conn:
+                conn.close()
+
+    except Exception as e:
+        print(f"[ERROR] Ошибка снятия: {str(e)}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("cancel_unassign_"))
+async def cancel_unassign(callback: types.CallbackQuery):
+    """Отмена операции снятия преподавателя"""
+    student_username = callback.data.split("_")[2]
+
+    await callback.message.edit_text(
+        f"❎ Снятие преподавателя для @{student_username} отменено",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Вернуться к управлению", callback_data="teacher_management")
+        ]])
+    )
+    await callback.answer("Операция отменена")
+
+
+@dp.callback_query(F.data.startswith("refresh_unassign_"))
+async def refresh_unassign(callback: types.CallbackQuery):
+    """Обновление данных перед снятием преподавателя"""
+    try:
+        student_username = callback.data.split("_")[2]
+        print(f"[DEBUG] Обновление данных для @{student_username}")
+
+        # Получаем актуальные данные
+        student_info = await get_user_info(student_username)
+        current_teacher = await get_current_teacher(student_username)
+
+        if not student_info:
+            await callback.answer("❌ Студент не найден", show_alert=True)
+            return await callback.message.edit_text(
+                "❌ Студент не найден",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Назад", callback_data="unassign_teacher_menu")
+                ]])
+            )
+
+        if not current_teacher:
+            await callback.answer("❌ Нет преподавателя", show_alert=True)
+            return await callback.message.edit_text(
+                f"ℹ️ У @{student_username} нет назначенного преподавателя",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Проверить снова", callback_data=f"refresh_unassign_{student_username}"),
+                    InlineKeyboardButton(text="Назад", callback_data="unassign_teacher_menu")
+                ]])
+            )
+
+        # Обновляем сообщение с актуальными данными
+        await callback.message.edit_text(
+            f"🔄 Данные обновлены\n\n"
+            f"Студент: @{student_username}\n"
+            f"Текущий преподаватель: {current_teacher['full_name']} (@{current_teacher['username']})\n\n"
+            f"Подтвердите снятие преподавателя:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Да, снять", callback_data=f"execute_unassign_{student_username}"),
+                    InlineKeyboardButton(text="❌ Нет", callback_data=f"cancel_unassign_{student_username}")
+                ],
+                [
+                    InlineKeyboardButton(text="🔄 Ещё раз обновить",
+                                         callback_data=f"refresh_unassign_{student_username}")
+                ]
+            ])
+        )
+        await callback.answer("Данные обновлены")
+
+    except Exception as e:
+        print(f"[ERROR] Ошибка обновления: {str(e)}")
+        await callback.message.edit_text(
+            "❌ Ошибка обновления данных",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Попробовать снова", callback_data=f"refresh_unassign_{student_username}"),
+                InlineKeyboardButton(text="Отмена", callback_data="unassign_teacher_menu")
+            ]])
+        )
+        await callback.answer("❌ Ошибка обновления", show_alert=True)
+
+
+
+async def get_all_students_with_teachers() -> list[tuple]:
+    """Возвращает полный список студентов (с преподавателями и без)"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT 
+                s.username as student_username,
+                s.full_name as student_name,
+                t.username as teacher_username, 
+                t.full_name as teacher_name
+            FROM users s
+            LEFT JOIN student_teacher st ON s.username = st.student_username
+            LEFT JOIN users t ON st.teacher_username = t.username
+            WHERE s.role = 'student'
+            ORDER BY s.username
+        """)
+        return cur.fetchall()
+    except Error as e:
+        print(f"Ошибка получения списка студентов: {e}")
+        return []
+    finally:
+        if conn:
+            conn.close()
+
+async def get_students_with_teachers_only() -> list[tuple]:
+    """Возвращает только студентов с преподавателями"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT 
+                s.username as student_username,
+                s.full_name as student_name,
+                t.username as teacher_username, 
+                t.full_name as teacher_name
+            FROM users s
+            JOIN student_teacher st ON s.username = st.student_username
+            JOIN users t ON st.teacher_username = t.username
+            WHERE s.role = 'student'
+            ORDER BY s.username
+        """)
+        return cur.fetchall()
+    except Error as e:
+        print(f"Ошибка получения списка студентов с преподавателями: {e}")
+        return []
+    finally:
+        if conn:
+            conn.close()
+
+
+@dp.callback_query(F.data == "assign_teacher_menu")
+async def assign_teacher_menu(callback: types.CallbackQuery):
+    """Меню выбора студента для назначения преподавателя"""
+    students = await get_students_without_teachers()
+
+    if not students:
+        await callback.answer("✅ У всех студентов есть преподаватели")
+        return
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"{full_name} (@{username})",
+            callback_data=f"assign_student_{username}"
+        )]
+        for username, full_name in students
+    ])
+
+    await callback.message.edit_text(
+        "👨‍🎓 Выберите студента для назначения преподавателя:",
+        reply_markup=keyboard
+    )
+    await callback.answer()
+@dp.callback_query(F.data.startswith("assign_student_"))
+async def select_student_for_teacher(callback: types.CallbackQuery):
+    """Обрабатывает выбор студента"""
+    student_username = callback.data.split("_")[2]
+    teachers = await get_teachers_list()
+
+    if not teachers:
+        await callback.answer("❌ Нет доступных преподавателей")
+        return
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"{full_name} (@{username})",
+            callback_data=f"confirm_assign_{student_username}_{username}"
+        )]
+        for username, full_name in teachers
+    ])
+
+    await callback.message.edit_text(
+        f"👨‍🏫 Выберите преподавателя для студента @{student_username}:",
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("confirm_assign_"))
+async def confirm_teacher_assignment(callback: types.CallbackQuery):
+    """Подтверждает назначение преподавателя"""
+    _, _, student_username, teacher_username = callback.data.split("_")
+
+    # Получаем информацию о пользователях
+    student_info = await get_user_info(student_username)
+    teacher_info = await get_user_info(teacher_username)
+
+    if not student_info or not teacher_info:
+        await callback.answer("❌ Ошибка: пользователь не найден")
+        return
+
+    # Сохраняем в базу данных
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Удаляем предыдущее назначение (если есть)
+        cur.execute("""
+            DELETE FROM student_teacher 
+            WHERE student_username = %s
+        """, (student_username,))
+
+        # Добавляем новое назначение
+        cur.execute("""
+            INSERT INTO student_teacher (student_username, teacher_username)
+            VALUES (%s, %s)
+        """, (student_username, teacher_username))
+
+        conn.commit()
+
+        # Отправляем уведомления
+        await notify_assignment(student_username, teacher_username)
+
+        await callback.message.edit_text(
+            f"✅ Преподаватель @{teacher_username} назначен для студента @{student_username}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="🔙 К списку студентов",
+                    callback_data="refresh_students"
+                )
+            ]])
+        )
+
+    except Error as e:
+        await callback.message.edit_text(
+            "❌ Ошибка при сохранении назначения",
+            reply_markup=None
+        )
+        print(f"Ошибка назначения преподавателя: {e}")
+    finally:
+        if conn:
+            conn.close()
+    await callback.answer()
+
+async def notify_assignment(student_username: str, teacher_username: str):
+    """Отправляет уведомления студенту и преподавателю"""
+    student_chat_id = await get_user_chat_id(student_username)
+    teacher_chat_id = await get_user_chat_id(teacher_username)
+
+    student_info = await get_user_info(student_username)
+    teacher_info = await get_user_info(teacher_username)
+
+    # Уведомление студенту
+    if student_chat_id:
+        try:
+            await bot.send_message(
+                chat_id=student_chat_id,
+                text=f"👨‍🏫 Вам назначен руководитель: {teacher_info['full_name']} (@{teacher_username})"
+            )
+        except Exception as e:
+            print(f"Ошибка уведомления студента: {e}")
+
+    # Уведомление преподавателю
+    if teacher_chat_id:
+        try:
+            await bot.send_message(
+                chat_id=teacher_chat_id,
+                text=f"👨‍🎓 Вам назначен студент: {student_info['full_name']} (@{student_username})"
+            )
+        except Exception as e:
+            print(f"Ошибка уведомления преподавателя: {e}")
+
+async def delete_assignment(student_username: str) -> bool:
+    """Удаляет связь студент-преподаватель"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            DELETE FROM student_teacher 
+            WHERE student_username = %s
+            RETURNING 1
+        """, (student_username,))
+        conn.commit()
+        return bool(cur.fetchone())
+    except Error as e:
+        print(f"[DB ERROR] Ошибка удаления связи: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+
+@dp.callback_query(F.data.startswith("execute_unassign_"))
+async def execute_unassign(callback: types.CallbackQuery):
+    """Фактическое снятие преподавателя"""
+    try:
+        student_username = callback.data.split("_")[2]
+
+        # Проверяем существование студента
+        student_info = await get_user_info(student_username)
+        if not student_info:
+            await callback.answer("❌ Студент не найден", show_alert=True)
+            return await callback.message.edit_text(
+                "❌ Студент не найден",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Назад", callback_data="teacher_management")
+                ]])
+            )
+
+        # Проверяем текущего преподавателя
+        current_teacher = await get_current_teacher(student_username)
+        if not current_teacher:
+            await callback.answer("ℹ️ У студента нет преподавателя", show_alert=True)
+            return await callback.message.edit_text(
+                f"ℹ️ У @{student_username} нет преподавателя",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Назад", callback_data="teacher_management")
+                ]])
+            )
+
+        # Удаляем связь из базы данных
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                DELETE FROM student_teacher 
+                WHERE student_username = %s
+                RETURNING 1
+            """, (student_username,))
+
+            if not cur.fetchone():
+                await callback.answer("❌ Не удалось снять преподавателя", show_alert=True)
+                return
+
+            conn.commit()
+
+            # Уведомляем студента
+            student_chat_id = await get_user_chat_id(student_username)
+            if student_chat_id:
+                try:
+                    await bot.send_message(
+                        chat_id=student_chat_id,
+                        text=f"ℹ️ С вас снят руководитель практики: {current_teacher['full_name']} (@{current_teacher['username']})"
+                    )
+                except Exception as e:
+                    print(f"Ошибка уведомления студента: {e}")
+
+            # Обновляем сообщение
+            await callback.message.edit_text(
+                f"✅ Преподаватель {current_teacher['full_name']} снят со студента @{student_username}\n"
+                f"Время: {datetime.now().strftime('%H:%M:%S')}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="В меню", callback_data="teacher_management")
+                ]])
+            )
+
+        except Error as e:
+            print(f"[DB ERROR] Ошибка снятия преподавателя: {e}")
+            await callback.message.edit_text(
+                "❌ Ошибка при снятии преподавателя",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Повторить", callback_data=f"confirm_unassign_{student_username}"),
+                    InlineKeyboardButton(text="Отмена", callback_data="teacher_management")
+                ]])
+            )
+        finally:
+            if conn:
+                conn.close()
+
+    except Exception as e:
+        print(f"[ERROR] Ошибка снятия: {str(e)}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@dp.callback_query(F.data == "refresh_students")
+async def refresh_students_list(callback: types.CallbackQuery):
+    """Обновляет список студентов"""
+    await callback.answer("🔄 Обновление списка...")
+    await show_all_students(callback.message)
 # Обработчик кнопки подачи заявления
 @dp.message(F.text == "📄 Подать заявление")
 async def start_application(message: types.Message, state: FSMContext):
@@ -993,8 +1583,7 @@ async def confirm_application(message: types.Message, state: FSMContext, bot: Bo
         )
 
     await state.clear()
-
-
+#тест пуш
 # Новая функция для получения информации о пользователе
 async def get_user_info(username: str) -> dict:
     """Возвращает информацию о пользователе из БД"""
@@ -1046,6 +1635,280 @@ async def get_methodists_list() -> list[tuple]:
     except Error as e:
         print(f"Ошибка получения списка методистов: {e}")
         return []
+    finally:
+        if conn:
+            conn.close()
+
+
+# Обработчик для методиста при получении заявления
+@dp.message(F.document | F.photo)
+async def handle_application_from_student(message: types.Message, state: FSMContext):
+    """Обрабатывает заявление от студента для методиста"""
+    user_role = await get_user_role_by_username(message.from_user.username)
+
+    if user_role != 'methodist':
+        return  # Только для методистов
+
+    # Проверяем, есть ли подпись с username студента
+    if message.caption and '@' in message.caption:
+        student_username = None
+        for part in message.caption.split():
+            if part.startswith('@'):
+                student_username = part[1:]
+                break
+
+        if student_username:
+            await state.update_data(student_username=student_username)
+            await start_assign_teacher_process(message, state)
+            return
+
+    # Если username не найден, предлагаем выбрать студента вручную
+    await message.answer("Выберите студента для назначения руководителя:")
+    await show_students_list(message, state)
+    await state.set_state(AssignTeacherStates.WAITING_STUDENT_SELECTION)
+
+
+async def show_students_list(message: types.Message, state: FSMContext):
+    """Показывает список студентов для выбора"""
+    students = await get_students_without_teachers()
+
+    if not students:
+        await message.answer("❌ Нет студентов без руководителей")
+        await state.clear()
+        return
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{full_name} (@{username})", callback_data=f"assign_student_{username}")]
+        for username, full_name in students
+    ])
+
+    await message.answer("👨‍🎓 Выберите студента:", reply_markup=keyboard)
+
+
+async def get_students_without_teachers() -> list[tuple]:
+    """Возвращает список студентов без назначенных преподавателей"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT u.username, u.full_name 
+            FROM users u
+            LEFT JOIN student_teacher st ON u.username = st.student_username
+            WHERE u.role = 'student' AND st.teacher_username IS NULL
+            ORDER BY u.username
+        """)
+        return cur.fetchall()
+    except Error as e:
+        print(f"Ошибка получения студентов без преподавателей: {e}")
+        return []
+    finally:
+        if conn:
+            conn.close()
+
+
+
+async def start_assign_teacher_process(message: types.Message, state: FSMContext):
+    """Начинает процесс назначения преподавателя"""
+    teachers = await get_teachers_list()
+
+    if not teachers:
+        await message.answer("❌ Нет доступных преподавателей")
+        await state.clear()
+        return
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{full_name} (@{username})", callback_data=f"assign_teacher_{username}")]
+        for username, full_name in teachers
+    ])
+
+    await message.answer("👨‍🏫 Выберите преподавателя:", reply_markup=keyboard)
+    await state.set_state(AssignTeacherStates.WAITING_TEACHER_SELECTION)
+
+
+# Обработчик выбора студента
+@dp.callback_query(AssignTeacherStates.WAITING_STUDENT_SELECTION, F.data.startswith("assign_student_"))
+async def process_student_selection(callback: types.CallbackQuery, state: FSMContext):
+    """Обрабатывает выбор студента"""
+    student_username = callback.data.split("_")[2]
+    await state.update_data(student_username=student_username)
+
+    await callback.message.edit_text(f"Выбран студент: @{student_username}")
+    await start_assign_teacher_process(callback.message, state)
+    await callback.answer()
+
+
+# Обработчик выбора преподавателя
+@dp.callback_query(AssignTeacherStates.WAITING_TEACHER_SELECTION, F.data.startswith("assign_teacher_"))
+async def process_teacher_selection(callback: types.CallbackQuery, state: FSMContext):
+    """Обрабатывает выбор преподавателя"""
+    teacher_username = callback.data.split("_")[2]
+    data = await state.get_data()
+    student_username = data.get('student_username')
+
+    if not student_username:
+        await callback.answer("❌ Ошибка: студент не выбран")
+        await state.clear()
+        return
+
+    # Получаем информацию о студенте и преподавателе
+    student_info = await get_user_info(student_username)
+    teacher_info = await get_user_info(teacher_username)
+
+    if not student_info or not teacher_info:
+        await callback.answer("❌ Ошибка: пользователь не найден")
+        await state.clear()
+        return
+
+    await state.update_data(teacher_username=teacher_username)
+
+    # Формируем сообщение подтверждения
+    confirm_text = (
+        "📋 Подтвердите назначение:\n\n"
+        f"👨‍🎓 Студент: {student_info['full_name']} (@{student_username})\n"
+        f"👨‍🏫 Руководитель: {teacher_info['full_name']} (@{teacher_username})\n\n"
+        "Назначить этого преподавателя руководителем практики для студента?"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_assignment"),
+            InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_assignment")
+        ]
+    ])
+
+    await callback.message.edit_text(confirm_text, reply_markup=keyboard)
+    await state.set_state(AssignTeacherStates.CONFIRM_ASSIGNMENT)
+    await callback.answer()
+
+
+# Обработчик подтверждения назначения
+@dp.callback_query(AssignTeacherStates.CONFIRM_ASSIGNMENT, F.data == "confirm_assignment")
+async def confirm_assignment(callback: types.CallbackQuery, state: FSMContext):
+    """Подтверждает назначение преподавателя"""
+    data = await state.get_data()
+    student_username = data.get('student_username')
+    teacher_username = data.get('teacher_username')
+
+    if not student_username or not teacher_username:
+        await callback.answer("❌ Ошибка: данные неполные")
+        await state.clear()
+        return
+
+    # Сохраняем в базу данных
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Удаляем предыдущее назначение (если есть)
+        cur.execute("""
+            DELETE FROM student_teacher 
+            WHERE student_username = %s
+        """, (student_username,))
+
+        # Добавляем новое назначение
+        cur.execute("""
+            INSERT INTO student_teacher (student_username, teacher_username)
+            VALUES (%s, %s)
+        """, (student_username, teacher_username))
+
+        conn.commit()
+
+        # Отправляем уведомление студенту
+        student_chat_id = await get_user_chat_id(student_username)
+        teacher_info = await get_user_info(teacher_username)
+
+        if student_chat_id:
+            try:
+                await bot.send_message(
+                    chat_id=student_chat_id,
+                    text=f"👨‍🏫 Вам назначен руководитель практики: {teacher_info['full_name']} (@{teacher_username})"
+                )
+            except Exception as e:
+                print(f"Ошибка отправки уведомления студенту: {e}")
+
+        await callback.message.edit_text(
+            "✅ Руководитель практики успешно назначен!",
+            reply_markup=None
+        )
+
+    except Error as e:
+        await callback.message.edit_text(
+            "❌ Ошибка при сохранении назначения",
+            reply_markup=None
+        )
+        print(f"Ошибка назначения руководителя: {e}")
+    finally:
+        if conn:
+            conn.close()
+        await state.clear()
+    await callback.answer()
+
+
+# Обработчик отмены назначения
+@dp.callback_query(AssignTeacherStates.CONFIRM_ASSIGNMENT, F.data == "cancel_assignment")
+async def cancel_assignment(callback: types.CallbackQuery, state: FSMContext):
+    """Отменяет процесс назначения"""
+    await callback.message.edit_text(
+        "❌ Назначение отменено",
+        reply_markup=None
+    )
+    await state.clear()
+    await callback.answer()
+
+
+async def get_user_chat_id(username: str) -> int:
+    """Возвращает chat_id пользователя по username"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT chat_id FROM users WHERE username = %s
+        """, (username,))
+        result = cur.fetchone()
+        return result[0] if result else None
+    except Error as e:
+        print(f"Ошибка получения chat_id: {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+
+# Обработчик кнопки "Мой преподаватель"
+@dp.message(F.text == "👨‍🏫 Мой преподаватель")
+async def show_my_teacher(message: types.Message):
+    """Показывает информацию о назначенном преподавателе"""
+    student_username = message.from_user.username
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT u.username, u.full_name 
+            FROM student_teacher st
+            JOIN users u ON st.teacher_username = u.username
+            WHERE st.student_username = %s
+        """, (student_username,))
+        teacher = cur.fetchone()
+
+        if teacher:
+            username, full_name = teacher
+            await message.answer(
+                f"👨‍🏫 Ваш руководитель практики:\n"
+                f"{full_name} (@{username})\n\n"
+                f"Вы можете связаться с ним в любое время."
+            )
+        else:
+            await message.answer(
+                "❌ Вам еще не назначен руководитель практики.\n"
+                "Подайте заявление и ожидайте назначения."
+            )
+    except Error as e:
+        await message.answer("❌ Ошибка при получении данных")
+        print(f"Ошибка получения преподавателя: {e}")
     finally:
         if conn:
             conn.close()
