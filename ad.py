@@ -37,7 +37,7 @@ dp = Dispatcher()
 def get_db_connection():
     """Установка соединения с PostgreSQL"""
     try:
-        conn = psycopg2.connect(**DB_CONFIG)
+        conn = get_db_connection()
         return conn
     except Error as e:
         print(f"Ошибка подключения к PostgreSQL: {e}")
