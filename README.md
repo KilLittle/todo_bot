@@ -1,7 +1,6 @@
 # Telegram Bot for Educational Practice Management
 
 Бот для управления учебными практиками студентов с ролевой системой (администраторы, методисты, преподаватели, студенты).
----
 ## ⚙️ Процесс
 Диаграммы: 
 - [IDEF0](https://drive.google.com/file/d/1mdOV-tPyFfxxlt1a6NRojqtBLCncWilJ/view)
