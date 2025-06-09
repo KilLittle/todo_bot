@@ -502,7 +502,7 @@ async def cmd_start(message: types.Message):
             [types.KeyboardButton(text="🔄 Старт"),
              types.KeyboardButton(text="👨‍🏫 Мой преподаватель")],
             [types.KeyboardButton(text="📄 Подать заявление"),
-             types.KeyboardButton(text="📝 Индивидуальное задание")],
+             types.KeyboardButton(text="📝 Мои задания")],
             [types.KeyboardButton(text="📋 Посмотреть расписание")]
         ]
         await message.answer("🎓 Добро пожаловать, студент!", reply_markup=markup)
@@ -517,239 +517,7 @@ async def handle_start_button(message: types.Message):
     # Вызываем тот же обработчик, что и для команды /start
     await cmd_start(message)
 
-async def get_assignment_info(student_username: str) -> dict:
-    """Получает информацию о задании студента из БД"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT  file_name, file_content, created_by, status 
-            FROM assignment_tasks 
-            WHERE student_username = %s
-        """, (student_username,))
-        result = cur.fetchone()
 
-        if result:
-            return {
-                'file_name': result[0],
-                'file_content': result[1],
-                'created_by': result[2],
-                'status': result[3]
-            }
-        return None
-    except Error as e:
-        print(f"Ошибка получения задания: {e}")
-        return None
-    finally:
-        if conn:
-            conn.close()
-
-
-async def download_assignment(assignment_id: int, chat_id: int):
-    """Отправляет файл задания пользователю"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT file_content, title 
-            FROM assignment_tasks 
-            WHERE id = %s
-        """, (assignment_id,))
-        result = cur.fetchone()
-
-        if result:
-            file_content, title = result
-            await bot.send_document(
-                chat_id=chat_id,
-                document=types.BufferedInputFile(
-                    file=file_content,
-                    filename=f"{title}.pdf"
-                ),
-                caption=f"📄 Ваше индивидуальное задание: {title}"
-            )
-            return True
-        return False
-    except Error as e:
-        print(f"Ошибка скачивания задания: {e}")
-        return False
-    finally:
-        if conn:
-            conn.close()
-
-
-
-
-async def get_teacher_assignments(teacher_username: str) -> list[tuple]:
-    """Возвращает список заданий преподавателя"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT a.student_username, a.title, a.deadline 
-            FROM assignment_tasks a
-            JOIN users u ON a.student_username = u.username
-            WHERE a.teacher_username = %s AND a.status = 'assigned'
-            ORDER BY a.deadline
-        """, (teacher_username,))
-        return cur.fetchall()
-    except Error as e:
-        print(f"Ошибка получения заданий преподавателя: {e}")
-        return []
-    finally:
-        if conn:
-            conn.close()
-
-
-@dp.callback_query(F.data == "view_assignments")
-async def view_assignments(callback: types.CallbackQuery):
-    """Показывает список заданий студентов по преподавателю"""
-    user_role = await get_user_role_by_username(callback.from_user.username)
-
-    if user_role != 'teacher':
-        await callback.answer("❌ Доступно только преподавателям")
-        return
-
-    # Получаем список студентов текущего преподавателя
-    students = await get_teacher_students(callback.from_user.username)
-
-    if not students:
-        await callback.answer("ℹ️ У вас нет студентов с заданиями")
-        return
-
-    # Группируем задания по студентам и форматируем ответ
-    full_text = "📚 Задания студентов:\n\n"
-
-    # Split students into chunks of 10 to avoid long text
-    for i in range(0, len(students), 10):
-        chunk = students[i:i + 10]
-        for student in chunk:
-            full_text += await format_assignments_per_student({
-                'username': student[0],
-                'full_name': student[1],
-                'chat_id': student[2]
-            })
-
-        if i + 10 < len(students):  # Add separator only if there are more students
-            full_text += "\n---\n"
-
-    # Send the text to the user (limited to 4096 characters)
-    if len(full_text) > 4096:
-        # For very long texts, split into multiple messages
-        pass  # Add splitting logic here
-
-    await callback.message.answer(full_text)
-    await callback.answer()
-
-
-async def get_teacher_students(teacher_username: str) -> list[tuple]:
-    """Возвращает список студентов преподавателя с информацией о их заданиях"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT s.username, s.full_name, u.chat_id
-            FROM students st
-            JOIN users s ON st.student_username = s.username
-            WHERE st.teacher_username = %s
-        """, (teacher_username,))
-        return cur.fetchall()
-    except Error as e:
-        print(f"Ошибка получения студентов преподавателя: {e}")
-        return []
-    finally:
-        if conn:
-            conn.close()
-
-@dp.callback_query(F.data == "check_submitted")
-async def check_submitted_N(callback: types.CallbackQuery):
-    """Показывает сданные задания"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT a.student_username, a.title, a.submitted_date 
-            FROM assignment_tasks a
-            WHERE a.teacher_username = %s AND a.status = 'submitted'
-            ORDER BY a.submitted_date DESC
-        """, (callback.from_user.username,))
-        assignments = cur.fetchall()
-
-        if not assignments:
-            await callback.answer("ℹ️ Нет сданных заданий")
-            return
-
-        response = ["📤 Сданные задания:"]
-        for idx, (student, title, submitted_date) in enumerate(assignments, 1):
-            response.append(
-                f"{idx}. {title}\n"
-                f"   👨‍🎓 Студент: @{student}\n"
-                f"   📅 Дата сдачи: {submitted_date.strftime('%d.%m.%Y')}"
-            )
-
-        await callback.message.edit_text("\n".join(response))
-
-    except Error as e:
-        await callback.message.edit_text("❌ Ошибка при получении заданий")
-        print(f"Ошибка получения сданных заданий: {e}")
-    finally:
-        if conn:
-            conn.close()
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "tasks_statistics")
-async def show_tasks_statistics(callback: types.CallbackQuery):
-    """Показывает статистику по заданиям"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-
-        # Получаем общую статистику
-        cur.execute("""
-            SELECT 
-                COUNT(*) as total,
-                SUM(CASE WHEN status = 'assigned' THEN 1 ELSE 0 END) as assigned,
-                SUM(CASE WHEN status = 'submitted' THEN 1 ELSE 0 END) as submitted,
-                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed
-            FROM assignment_tasks
-            WHERE teacher_username = %s
-        """, (callback.from_user.username,))
-        stats = cur.fetchone()
-
-        # Получаем информацию о просроченных заданиях
-        cur.execute("""
-            SELECT COUNT(*) 
-            FROM assignment_tasks 
-            WHERE teacher_username = %s 
-            AND status = 'assigned' 
-            AND deadline < CURRENT_DATE
-        """, (callback.from_user.username,))
-        overdue = cur.fetchone()[0]
-
-        response = (
-            f"📊 Статистика по заданиям:\n\n"
-            f"• Всего заданий: {stats[0]}\n"
-            f"• Назначено: {stats[1]}\n"
-            f"• Сдано: {stats[2]}\n"
-            f"• Завершено: {stats[3]}\n"
-            f"• Просрочено: {overdue}"
-        )
-
-        await callback.message.edit_text(response)
-
-    except Error as e:
-        await callback.message.edit_text("❌ Ошибка при получении статистики")
-        print(f"Ошибка получения статистики: {e}")
-    finally:
-        if conn:
-            conn.close()
-    await callback.answer()
 
 
 async def get_teacher_students(teacher_username: str) -> list[tuple[str, str]]:
@@ -786,39 +554,7 @@ async def get_teacher_students(teacher_username: str) -> list[tuple[str, str]]:
         if conn:
             conn.close()
 
-# В меню преподавателя добавляем кнопку работы с заданиями
-async def get_student_assignments(student_username: str) -> list[dict]:
-    """Возвращает список заданий для студента"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT 
-                file_name, file_content, created_by, status
-            FROM assignment_tasks a
-            WHERE 
-                student_username = %s AND
-                status = true
-        """, (student_username,))
-        result = cur.fetchall()
 
-        assignments = []
-        for row in result:
-            assignments.append({
-                'file_name': row[0],
-                'file_content': row[1],
-                'status': row[2],
-                'created_by': row[3],
-                'status': row[4]
-            })
-        return assignments
-    except Error as e:
-        print(f"Ошибка получения заданий студента: {e}")
-        return []
-    finally:
-        if conn:
-            conn.close()
 
 @dp.callback_query(F.data == "assign_new_task")
 async def start_assignment_process(callback: types.CallbackQuery, state: FSMContext):
@@ -871,6 +607,7 @@ async def select_student(callback: types.CallbackQuery, state: FSMContext):
             reply_markup=None
         )
         await state.set_state(AssignmentStates.WAITING_TITLE)
+
     else:
         # Для методиста продолжаем стандартный процесс
         await start_assign_teacher_process(callback.message, state)
@@ -881,19 +618,20 @@ async def select_student(callback: types.CallbackQuery, state: FSMContext):
 @dp.message(AssignmentStates.WAITING_TITLE)
 async def process_title(message: types.Message, state: FSMContext):
     """Обрабатывает название задания и переходит к описанию"""
-
+    title = None if message.text == "-" else message.text
+    await state.update_data(title=title)
 
 
     # Получаем данные о студенте из состояния
     data = await state.get_data()
     student_username = data.get('student_username')
-
+    title=data.get('title')
     await message.answer(
         f"📝 Введите описание задания для @{student_username} (можно пропустить, отправивить '-'):",
         reply_markup=types.ReplyKeyboardRemove()
     )
     await state.set_state(AssignmentStates.WAITING_DESCRIPTION)
-
+    await state.update_data(title=title)
 
 @dp.message(AssignmentStates.WAITING_DESCRIPTION)
 async def process_description(message: types.Message, state: FSMContext):
@@ -925,62 +663,7 @@ async def process_deadline(message: types.Message, state: FSMContext):
 
 
 
-@dp.callback_query(AssignmentStates.CONFIRMATION, F.data == "confirm_assignment")
-async def confirm_assignment(callback: types.CallbackQuery, state: FSMContext):
-    print("Обработчик confirm_assignment вызван")
-    """Подтверждает создание задания"""
-    data = await state.get_data()
-    print("Пытаюсь создать задание 2")
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
 
-        cur.execute("""
-            INSERT INTO assignment_tasks 
-            (file_name, file_content, created_by, created_by, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            data['student_username'],
-            callback.from_user.username,
-            data['file_name'],
-            data['file_content'],
-            data['created_by'],
-            data.get('status'),
-            date.today(),
-            'assigned'
-        ))
-        conn.commit()
-
-        # Уведомляем студента
-        student_chat_id = await get_user_chat_id(data['student_username'])
-        if student_chat_id:
-            try:
-                await bot.send_message(
-                    chat_id=student_chat_id,
-                    text=f"📝 Вам назначено новое задание от преподавателя:\n\n"
-                         f"📌 {data['title']}\n"
-                         f"📅 Срок сдачи: {data['deadline'].strftime('%d.%m.%Y')}"
-                )
-            except Exception as e:
-                print(f"Ошибка уведомления студента: {e}")
-
-        await callback.message.edit_text(
-            "✅ Задание успешно назначено!",
-            reply_markup=None
-        )
-
-    except Error as e:
-        await callback.message.edit_text(
-            "❌ Ошибка при сохранении задания",
-            reply_markup=None
-        )
-        print(f"Ошибка сохранения задания: {e}")
-    finally:
-        if conn:
-            conn.close()
-        await state.clear()
-    await callback.answer()
 
 
 @dp.callback_query(AssignmentStates.CONFIRMATION, F.data == "cancel_assignment")
@@ -1057,104 +740,50 @@ async def assign_task_to_my_student(callback: types.CallbackQuery, state: FSMCon
     await callback.answer()
 
 
-@dp.message(F.text == "📝 Индивидуальное задание")
-async def handle_individual_task(message: types.Message):
-    """Обработчик кнопки индивидуального задания для студента"""
-    student_username = message.from_user.username
-
-    # Получаем информацию о задании из базы данных
-    assignment = await get_assignment_info(student_username)
-
-    if assignment:
-        # Формируем текст сообщения
-        response = (
-            f"📝 <b>Ваше индивидуальное задание:</b>\n\n"
-            f"<b>Название:</b> {assignment['file_name']}\n"
-            f"<b>Статус:</b> {assignment['file_content']}\n"
-            f"<b>Дата выдачи:</b> {assignment['created_by'].strftime('%d.%m.%Y')}\n"
-            f"<b>Срок сдачи:</b> {assignment['status']}"
-        )
-
-        # Создаем кнопки для скачивания и просмотра
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📥 Скачать задание",
-                    callback_data=f"download_assignment_{assignment['id']}"
-                )
-            ]
-        ])
-
-        await message.answer(response, reply_markup=keyboard, parse_mode="HTML")
-    else:
-        await message.answer(
-            "ℹ️ Вам еще не назначено индивидуальное задание.\n"
-            "Ожидайте назначения от вашего руководителя."
-        )
-
-
-@dp.callback_query(F.data.startswith("download_assignment_"))
-async def download_assignment_handler(callback: types.CallbackQuery):
-    """Обработчик скачивания задания"""
-    assignment_id = int(callback.data.split("_")[2])
-
+@dp.message(F.text == "👨‍🏫 Преподаватели")
+async def show_teachers_list(message: types.Message):
+    """Показывает список всех преподавателей"""
     try:
-        # Получаем данные о задании из базы
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("""
-            SELECT file_content, title 
-            FROM assignment_tasks 
-            WHERE id = %s
-        """, (assignment_id,))
-        result = cur.fetchone()
 
-        if result:
-            file_content, title = result
-            # Отправляем файл студенту
-            await callback.message.answer_document(
-                document=types.BufferedInputFile(
-                    file=file_content,
-                    filename=f"{title}.pdf"
-                ),
-                caption=f"📄 Ваше индивидуальное задание: {title}"
+        # Получаем список преподавателей с количеством студентов
+        cur.execute("""
+            SELECT 
+                u.username, 
+                u.full_name,
+                COUNT(st.student_username) as students_count
+            FROM users u
+            LEFT JOIN student_teacher st ON u.username = st.teacher_username
+            WHERE u.role = 'teacher'
+            GROUP BY u.username, u.full_name
+            ORDER BY u.full_name
+        """)
+
+        teachers = cur.fetchall()
+
+        if not teachers:
+            await message.answer("👨‍🏫 В системе пока нет преподавателей")
+            return
+
+        # Формируем сообщение
+        teachers_text = "👨‍🏫 <b>Список преподавателей:</b>\n\n"
+        for teacher in teachers:
+            username, full_name, students_count = teacher
+            teachers_text += (
+                f"👤 <b>{full_name}</b> (@{username})\n"
+                f"👨‍🎓 Студентов: {students_count}\n\n"
             )
-            await callback.answer("Файл отправлен")
-        else:
-            await callback.answer("❌ Файл задания не найден", show_alert=True)
+
+        await message.answer(teachers_text, parse_mode="HTML")
 
     except Exception as e:
-        print(f"Ошибка при скачивании задания: {e}")
-        await callback.answer("❌ Ошибка при отправке файла", show_alert=True)
+        await message.answer(f"❌ Ошибка при получении списка преподавателей: {str(e)}")
     finally:
         if conn:
             conn.close()
 
 
-@dp.callback_query(F.data.startswith("edit_assignment_"))
-async def edit_assignment_handler(callback: types.CallbackQuery):
-    """Обработчик редактирования задания"""
-    assignment_id = int(callback.data.split("_")[2])
-    await callback.answer("Функция редактирования в разработке", show_alert=True)
-
-@dp.message(F.text == "⚙️ Настройки")
-async def settings_menu(message: types.Message):
-    """Меню настроек с кнопкой старт"""
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="👤 Профиль")],
-            [KeyboardButton(text="🔔 Уведомления")],
-            [KeyboardButton(text="/start")],  # Кнопка старт
-            [KeyboardButton(text="🔙 Главное меню")]
-        ],
-        resize_keyboard=True,
-        is_persistent=True
-    )
-
-    await message.answer(
-        "⚙️ Настройки системы:",
-        reply_markup=keyboard
-    )
 async def get_user_role_by_username(username: str):
     """Получить роль пользователя по username из БД"""
     if not username:
@@ -1812,6 +1441,7 @@ async def get_all_students_with_teachers() -> list[tuple]:
         if conn:
             conn.close()
 
+
 async def get_students_with_teachers_only() -> list[tuple]:
     """Возвращает только студентов с преподавателями"""
     conn = None
@@ -2137,35 +1767,36 @@ async def handle_uploaded_file(message: types.Message, state: FSMContext, bot: B
                 allowed_types = {
                     'application/pdf',
                     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-                    'application/msword'
+                    'application/msword',
+                    'text/plain'
                 }
 
                 if message.document.mime_type not in allowed_types:
                     await message.answer(
-                        "❌ Поддерживаются только файлы PDF или DOC/DOCX",
+                        "❌ Поддерживаются только файлы PDF, DOC/DOCX или TXT",
                         reply_markup=types.ReplyKeyboardRemove()
                     )
                     return
 
-                try:
-                    file = await bot.get_file(message.document.file_id)
-                    file_bytes = (await bot.download_file(file.file_path)).read()
-                    file_info['file_content'] = file_bytes
-                except Exception as e:
-                    print(f"Ошибка загрузки файла задания: {e}")
-                    await message.answer(
-                        "❌ Не удалось загрузить файл. Попробуйте снова",
-                        reply_markup=types.ReplyKeyboardRemove()
-                    )
-                    return
-
-            file_info.update({
-                'file_id': message.document.file_id,
-                'file_name': message.document.file_name or "document",
-                'file_type': 'document'
-            })
+            try:
+                file = await bot.get_file(message.document.file_id)
+                file_bytes = (await bot.download_file(file.file_path)).read()
+                file_info.update({
+                    'file_id': message.document.file_id,
+                    'file_name': message.document.file_name or "document",
+                    'file_type': 'document',
+                    'file_content': file_bytes  # Всегда сохраняем содержимое для заданий
+                })
+            except Exception as e:
+                print(f"Ошибка загрузки файла: {e}")
+                await message.answer(
+                    "❌ Не удалось загрузить файл. Попробуйте снова",
+                    reply_markup=types.ReplyKeyboardRemove()
+                )
+                return
 
         elif message.photo:
+            # Для фото сохраняем только file_id (не сохраняем содержимое в БД)
             file_info.update({
                 'file_id': message.photo[-1].file_id,
                 'file_name': f"photo_{message.photo[-1].file_unique_id}.jpg",
@@ -2215,6 +1846,7 @@ async def handle_uploaded_file(message: types.Message, state: FSMContext, bot: B
             next_state = AssignmentStates.CONFIRMATION
 
         elif is_application:
+            # Для заявок не сохраняем содержимое файла в БД
             confirm_text = (
                 f"📄 Файл '{file_info['file_name']}' готов к отправке методисту.\n"
                 "Подтвердите отправку:"
@@ -2237,6 +1869,7 @@ async def handle_uploaded_file(message: types.Message, state: FSMContext, bot: B
             reply_markup=types.ReplyKeyboardRemove()
         )
         await state.clear()
+
 
 
 @dp.callback_query(ApplicationStates.WAITING_APPLICATION_CONFIRM, F.data == "confirm_application")
@@ -2287,24 +1920,12 @@ async def confirm_application(callback: types.CallbackQuery, state: FSMContext, 
                              types.KeyboardButton(text="📄 Подать заявление")
                          ],
                          [
-                             types.KeyboardButton(text="📝 Индивидуальное задание")
+                             types.KeyboardButton(text="📝 Мои задания")
                          ]
                      ] ,
             resize_keyboard=True
         )
-    elif user_role == 'methodist':
-        markup = ReplyKeyboardMarkup(
-            keyboard=[
-                         [
-                             types.KeyboardButton(text="👨‍🏫 Мой преподаватель"),
-                             types.KeyboardButton(text="📄 Подать заявление")
-                         ],
-                         [
-                             types.KeyboardButton(text="📝 Индивидуальное задание")
-                         ]
-                     ] ,
-            resize_keyboard=True
-        )
+
     else:
         markup = ReplyKeyboardMarkup(
             keyboard=[
@@ -2342,7 +1963,7 @@ async def cancel_application(callback: types.CallbackQuery, state: FSMContext):
                              types.KeyboardButton(text="📄 Подать заявление")
                          ],
                          [
-                             types.KeyboardButton(text="📝 Индивидуальное задание")
+                             types.KeyboardButton(text="📝 Мои задания")
                          ]
                      ] ,
             resize_keyboard=True
@@ -2395,6 +2016,53 @@ async def cancel_application(message: types.Message, state: FSMContext):
         reply_markup=types.ReplyKeyboardRemove()
     )
     await state.clear()
+
+
+@dp.message(F.text == "📝 Мои задания")
+async def show_my_assignments(message: types.Message):
+    """Показывает задания текущего студента"""
+    student_username = message.from_user.username
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Получаем все задания студента
+        cur.execute("""
+            SELECT title, description, deadline, status, file_name 
+            FROM assignment_tasks 
+            WHERE student_username = %s
+            ORDER BY deadline
+        """, (student_username,))
+
+        tasks = cur.fetchall()
+
+        if not tasks:
+            await message.answer("📭 У вас пока нет заданий")
+            return
+
+        # Формируем сообщение
+        tasks_text = "📋 Ваши задания:\n\n"
+        for task in tasks:
+            title, description, deadline, status, file_name = task
+            days_left = (deadline - datetime.now().date()).days
+
+            status_icon = "✅" if status == "completed" else "🕒" if status == "in_progress" else "❗"
+            tasks_text += f"{status_icon} <b>{title}</b>\n"
+            if description:
+                tasks_text += f"📝 Описание: {description}\n"
+            tasks_text += f"📅 Срок: {deadline.strftime('%d.%m.%Y')} ({days_left} дней)\n"
+            if file_name:
+                tasks_text += f"📎 Файл: {file_name}\n"
+            tasks_text += "\n"
+
+        await message.answer(tasks_text, parse_mode="HTML")
+
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+    finally:
+        if conn:
+            conn.close()
 
 
 # Новая функция для получения списка методистов
@@ -2637,187 +2305,99 @@ async def process_teacher_selection(callback: types.CallbackQuery, state: FSMCon
 
     await callback.answer()
 # Добавляем новую функцию для получения файла задания из базы
-async def get_assignment_file() -> bytes:
-    """Получает файл типового задания из базы данных"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT file_content FROM assignment_tasks 
-            WHERE status = TRUE 
-            ORDER BY created_at DESC 
-            LIMIT 1
-        """)
-        result = cur.fetchone()
-        return result[0] if result else None
-    except Error as e:
-        print(f"Ошибка получения файла задания: {e}")
-        return None
-    finally:
-        if conn:
-            conn.close()
 
-# Обработчик подтверждения назначения
-@dp.callback_query(AssignTeacherStates.CONFIRM_ASSIGNMENT, F.data == "confirm_assignment")
-async def confirm_assignment(callback: types.CallbackQuery, state: FSMContext):
-    """Подтверждает назначение преподавателя"""
+
+@dp.message(F.document.mime_type.in_([
+    'application/pdf',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+]))
+async def handle_template_upload(
+        message: types.Message,
+        state: FSMContext,
+        bot: Bot
+):
+    """Обработчик загрузки файла задания с сохранением в БД"""
+    # Получаем данные из состояния FSM
+    user_role = await get_user_role_by_username(message.from_user.username)
     data = await state.get_data()
-    student_username = data.get('student_username')
-    teacher_username = data.get('teacher_username')
+    if user_role != "student": #записывается заявление,его надо в другую таблицу
+        # Проверяем наличие обязательных полей
+        if not all(key in data for key in ['student_username', 'title', 'deadline']):
+            missing = [key for key in ['student_username', 'title', 'deadline'] if key not in data]
+            await message.answer(f"❌ Отсутствуют данные: {', '.join(missing)}")
+            return
 
-    if not student_username or not teacher_username:
-        await callback.answer("❌ Ошибка: данные неполные")
-        await state.clear()
-        return
+    if user_role != "student":
+        conn = None
+        try:
+            # Извлекаем данные из состояния
+            student_username = data['student_username']
+            title = data['title']
 
-    print(f"Назначение преподавателя: student={student_username}, teacher={teacher_username}")
+            description = data.get('description', '')
 
+            # Парсинг даты
+            deadline = data['deadline']
 
-    # Сохраняем в базу данных
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
+            # Загрузка файла
+            file = await bot.get_file(message.document.file_id)
+            file_bytes = (await bot.download_file(file.file_path)).read()
 
-        # Удаляем предыдущее назначение (если есть)
-        cur.execute("""
-            DELETE FROM student_teacher 
-            WHERE student_username = %s
-        """, (student_username,))
-
-        # Добавляем новое назначение
-        cur.execute("""
-            INSERT INTO student_teacher (student_username, teacher_username)
-            VALUES (%s, %s)
-        """, (student_username, teacher_username))
-
-        conn.commit()
-
-        # Уведомляем студента
-        student_chat_id = await get_user_chat_id(student_username)
-        teacher_info = await get_user_info(teacher_username)
-
-        if student_chat_id and teacher_info:
+            # Сохранение в БД
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO assignment_tasks (
+                    student_username, teacher_username, title,
+                    description, deadline, file_name, file_content
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (
+                student_username,
+                message.from_user.username,
+                title,
+                description,
+                deadline,
+                message.document.file_name,
+                file_bytes
+            ))
+            conn.commit()
+            # Ищем chat_id студента
+            cur.execute("SELECT chat_id FROM users WHERE username = %s", (student_username,))
+            student_data = cur.fetchone()
+            chat_id = student_data[0]
+            # Уведомление студента
             try:
                 await bot.send_message(
-                    chat_id=student_chat_id,
-                    text=f"👨‍🏫 Вам назначен руководитель практики: {teacher_info['full_name']} (@{teacher_username})"
+                    chat_id=chat_id,
+                    text=f"📌 Новое задание: {title}\n"
+                         f"📅 Срок: {deadline}\n"
+                         f"📎 Файл: {message.document.file_name}"
                 )
-
-                # Отправляем типовое задание
-                assignment_file = await get_assignment_file()
-                if assignment_file:
-                    cur.execute("""
-                        INSERT INTO assignments 
-                        (student_username, teacher_username, title, file_content, status)
-                        VALUES (%s, %s, %s, %s, %s)
-                    """, (
-                        student_username,
-                        teacher_username,
-                        "Типовое индивидуальное задание",
-                        assignment_file,
-                        'assigned'
-                    ))
-                    conn.commit()
-
-                    await bot.send_document(
-                        chat_id=student_chat_id,
-                        document=types.BufferedInputFile(
-                            file=assignment_file,
-                            filename="Типовое индивидуальное задание.pdf"
-                        ),
-                        caption="📄 Ваше типовое индивидуальное задание"
-                    )
-                else:
-                    await bot.send_message(
-                        chat_id=student_chat_id,
-                        text="ℹ️ Файл с типовым заданием временно недоступен"
-                    )
-
             except Exception as e:
-                print(f"Ошибка уведомления студента: {e}")
+                print(f"Ошибка уведомления: {e}")
 
-        await callback.message.edit_text(
-            "✅ Руководитель практики успешно назначен!",
-            reply_markup=None
-        )
-
-    except Error as e:
-        await callback.message.edit_text(
-            "❌ Ошибка при сохранении назначения",
-            reply_markup=None
-        )
-        print(f"Ошибка назначения руководителя: {e}")
-    finally:
-        if conn:
-            conn.close()
-        await state.clear()
-    await callback.answer()
-
-
-@dp.message(Command("upload_template"))
-async def upload_template_command(message: types.Message):
-    """Команда для загрузки файла"""
-    await message.answer("📤 Отправьте файл с типовым заданием (PDF/DOCX)")
-
-
-
-@dp.message(F.document & (F.document.mime_type == 'application/pdf') |
-            (F.document.mime_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'))
-async def handle_template_upload(message: types.Message, bot: Bot):
-    """Обработчик загрузки файла в базу данных"""
-
-
-    conn = None
-    try:
-        # Получаем информацию о файле
-        file_id = message.document.file_id
-        file = await bot.get_file(file_id)
-        file_bytes = (await bot.download_file(file.file_path)).read()
-
-        # Подключаемся к базе
-        conn = get_db_connection()
-        cur = conn.cursor()
-
-
-
-        # 2. Сохраняем новый
-        cur.execute("""
-            INSERT INTO assignment_tasks 
-            (file_name, file_content, created_by, status)
-            VALUES (%s, %s, %s, TRUE)
-        """, (
-            message.document.file_name,
-            file_bytes,
-            message.from_user.username
-        ))
-
-        conn.commit()
-        user_role = await get_user_role_by_username(message.from_user.username)
-        if user_role == "teacher":
+            # Ответ пользователю
             await message.answer(
                 f"""✅ Задание успешно загружено!
-            Файл: {message.document.file_name}
-            Размер: {len(file_bytes) / 1024:.1f} KB\n 
-        Вы можете вернуться в меню /start"""
+    Файл: {message.document.file_name}
+    Размер: {len(file_bytes) / 1024:.1f} KB\n 
+    Вы можете вернуться в меню /start"""
             )
-        else:
-            await message.answer(
-                f"""✅ Заявление успешно загружено!
-        Файл: {message.document.file_name}
-        Размер: {len(file_bytes) / 1024:.1f} KB\n 
-        Вы можете вернуться в меню /start""")
 
-    except Exception as e:
-        await message.answer(f"❌ Ошибка при загрузке задания: {str(e)}")
-        print(f"Ошибка загрузки задания: {e}")
-
-    finally:
-        if conn:
-            conn.close()
-
-
+        except ValueError:
+            await message.answer("❌ Неверный формат даты! Используйте ДД.ММ.ГГГГ")
+        except Exception as e:
+            await message.answer(f"❌ Ошибка при загрузке: {str(e)}")
+            print(f"Ошибка: {e}")
+        finally:
+            if conn:
+                conn.close()
+            await state.clear()
+    else:
+        await message.answer(
+            f"""✅ Заявление успешно загружено!
+  Вы можете вернуться в меню /start"""
+)
 @dp.message(F.document)
 async def handle_wrong_file_type(message: types.Message):
     """Обработчик неподдерживаемых форматов"""
@@ -2862,6 +2442,50 @@ async def get_user_chat_id(username: str) -> int:
         if conn:
             conn.close()
 
+
+
+@dp.message(F.text == "📝 Задания студентов")
+async def show_student_tasks(message: types.Message):
+
+    """Показываем задания текущего преподавателя"""
+    teacher_username = message.from_user.username
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Получаем все задания преподавателя
+        cur.execute("""
+            SELECT title, deadline, status 
+            FROM assignment_tasks 
+            WHERE teacher_username = %s
+            ORDER BY deadline
+        """, (teacher_username,))
+
+        tasks = cur.fetchall()
+
+        if not tasks:
+            await message.answer("📭 У вас пока нет заданий для студентов")
+            return
+
+        # Формируем сообщение
+        tasks_text = "📋 Ваши задания для студентов:\n\n"
+        for task in tasks:
+            title, deadline, status = task
+            days_left = (deadline - datetime.now().date()).days
+
+            status_icon = "🟢" if status == "completed" else "🟡" if status == "in_progress" else "🔴"
+            tasks_text += f"{status_icon} {title}\n"
+            tasks_text += f"📅 До дедлайна: {days_left} дней\n"
+            tasks_text += f"⏳ Статус: {status}\n\n"
+
+        await message.answer(tasks_text)
+
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+    finally:
+        if conn:
+            conn.close()
 
 # Обработчик кнопки "Мой преподаватель"
 @dp.message(F.text == "👨‍🏫 Мой преподаватель")
