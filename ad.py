@@ -507,10 +507,10 @@ async def show_main_menu(message: types.Message, user_role: str):
             # Кнопки администратора
             [types.KeyboardButton(text="🔄 Старт"),
              types.KeyboardButton(text="➕ Добавить пользователя")],
-            [types.KeyboardButton(text="👀 Просмотреть пользователей")],
+            [types.KeyboardButton(text="👀 Просмотреть пользователей"),
             
             # Кнопки методиста
-            [types.KeyboardButton(text="📋 Посмотреть расписание")],
+            types.KeyboardButton(text="📋 Посмотреть расписание")],
             [types.KeyboardButton(text="📅 Добавить расписание"),
              types.KeyboardButton(text="📢 Рассылка студентам")],
             [types.KeyboardButton(text="👨‍🎓 Список студентов"),
