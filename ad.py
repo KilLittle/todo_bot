@@ -567,9 +567,9 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
 # Обработчик кнопки "Старт" (дублирует функционал /start)
 @dp.message(F.text == "🔄 Старт")
-async def handle_start_button(message: types.Message):
-    # Вызываем тот же обработчик, что и для команды /start
-    await cmd_start(message)
+async def handle_start_button(message: types.Message, state: FSMContext):  # Добавьте state
+    await cmd_start(message, state)
+
 
 
 
