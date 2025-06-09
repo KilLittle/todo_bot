@@ -4,7 +4,6 @@ from aiogram import Bot, Dispatcher, types, F, exceptions
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from datetime import datetime, date
@@ -67,11 +66,18 @@ class ApplicationStates(StatesGroup):
     WAITING_APPLICATION_FILE = State()
     WAITING_APPLICATION_CONFIRM = State()
 
-# Добавляем новое состояние для процесса назначения руководителя
 class AssignTeacherStates(StatesGroup):
     WAITING_STUDENT_SELECTION = State()
     WAITING_TEACHER_SELECTION = State()
     CONFIRM_ASSIGNMENT = State()
+
+class AssignmentStates(StatesGroup):
+    WAITING_STUDENT_SELECTION = State()
+    WAITING_TITLE = State()
+    WAITING_DESCRIPTION = State()
+    WAITING_DEADLINE = State()
+    WAITING_FILE = State()
+    CONFIRMATION = State()
 
 @dp.message(F.text == "📅 Добавить расписание")
 async def cmd_add_schedule(message: types.Message, state: FSMContext):
@@ -381,15 +387,16 @@ async def cancel_schedule(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-async def add_user_to_db(username: str, role: str, full_name: str):
+async def add_user_to_db(username: str, role: str, full_name: str = None):
     """Добавление пользователя в БД"""
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO users (username, role, full_name) VALUES (%s, %s, %s) ON CONFLICT (username) DO UPDATE SET role = EXCLUDED.role, full_name = EXCLUDED.full_name",
-            (username, role, full_name)
+            "INSERT INTO users (username, role, full_name) VALUES (%s, %s, %s) "
+            "ON CONFLICT (username) DO UPDATE SET role = EXCLUDED.role, full_name = EXCLUDED.full_name",
+            (username, role, full_name or "Не указано")  # Добавляем третий параметр
         )
         conn.commit()
         cur.close()
@@ -400,6 +407,7 @@ async def add_user_to_db(username: str, role: str, full_name: str):
     finally:
         if conn is not None:
             conn.close()
+
 
 async def get_all_users():
     """Получение списка всех пользователей"""
@@ -421,222 +429,359 @@ async def get_all_users():
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
+
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Обновляем запись пользователя с chat_id
         cur.execute("""
-                INSERT INTO users (username, role, full_name, chat_id)
-                VALUES (%s, 'student', %s, %s)
-                ON CONFLICT (username) 
-                DO UPDATE SET 
-                    chat_id = EXCLUDED.chat_id,
-                    full_name = COALESCE(EXCLUDED.full_name, users.full_name)
-            """, (
+            INSERT INTO users (username, role, full_name, chat_id)
+            VALUES (%s, 'student', %s, %s)
+            ON CONFLICT (username) 
+            DO UPDATE SET 
+                chat_id = EXCLUDED.chat_id,
+                full_name = EXCLUDED.full_name
+        """, (
             message.from_user.username,
             message.from_user.full_name or "Аноним",
             message.chat.id
         ))
         conn.commit()
     except Error as e:
-        print(f"Ошибка сохранения chat_id: {e}")
+        print(f"Ошибка сохранения данных: {e}")
+        await message.answer("⚠️ Произошла ошибка при обновлении данных")
+        return
     finally:
         if conn:
             conn.close()
-    user_role = await get_user_role_by_username(message.from_user.username)
 
-    # Общая кнопка для всех ролей
-    common_buttons = [types.KeyboardButton(text="📋 Посмотреть расписание")], [KeyboardButton(text="🚀 /start")]
 
-    # Администратор
-    if message.from_user.username == ADMIN_USERNAME:
-        markup = types.ReplyKeyboardMarkup(
-            keyboard=[
-                [
-                    types.KeyboardButton(text="➕ Добавить пользователя"),
-                    types.KeyboardButton(text="👀 Просмотреть пользователей")
-                ],
-                [
-                    types.KeyboardButton(text="📅 Добавить расписание"),
-                    types.KeyboardButton(text="📋 Посмотреть расписание"),
-                    types.KeyboardButton(text="📢 Рассылка студентам")
-                ]
-            ],
-            resize_keyboard=True
-        )
+    try:
+        user_role = await get_user_role_by_username(message.from_user.username)
+        if not user_role:
+            await message.answer("❌ Ваш профиль не найден в системе")
+            return
+    except Exception as e:
+        print(f"Ошибка получения роли: {e}")
+        await message.answer("⚠️ Ошибка при проверке вашей роли")
+        return
+
+    markup = types.ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+
+    if user_role == "admin":
+        markup.keyboard = [
+            [types.KeyboardButton(text="🔄 Старт"),
+             types.KeyboardButton(text="➕ Добавить пользователя")],
+            [types.KeyboardButton(text="👀 Просмотреть пользователей")]
+        ]
         await message.answer("✨ Добро пожаловать, администратор!", reply_markup=markup)
 
-    # Методист
     elif user_role == "methodist":
-        markup = types.ReplyKeyboardMarkup(
-            keyboard=[
-                [
-                    types.KeyboardButton(text="📅 Добавить расписание"),
-                    types.KeyboardButton(text="📢 Рассылка студентам")
-                ],
-                [
-                    types.KeyboardButton(text="📋 Посмотреть расписание"),
-                    types.KeyboardButton(text="👨‍🏫 Преподаватели")
-                ],
-                [
-                    types.KeyboardButton(text="👨‍🎓 Список студентов"),
-                    types.KeyboardButton(text="⚙️ Настройки")
-                ],
-            ],
-            resize_keyboard=True
-        )
+        markup.keyboard = [
+            [types.KeyboardButton(text="🔄 Старт"),
+             types.KeyboardButton(text="📋 Посмотреть расписание")],
+            [types.KeyboardButton(text="📅 Добавить расписание"),
+             types.KeyboardButton(text="📢 Рассылка студентам")],
+            [types.KeyboardButton(text="👨‍🎓 Список студентов"),
+             types.KeyboardButton(text="👨‍🏫 Преподаватели")]
+        ]
         await message.answer("📚 Добро пожаловать, методист!", reply_markup=markup)
 
-    # Остальные роли
+    elif user_role == "teacher":
+        markup.keyboard = [
+            [types.KeyboardButton(text="🔄 Старт"),
+             types.KeyboardButton(text="📋 Посмотреть расписание")],
+            [types.KeyboardButton(text="👨‍🎓 Мои студенты"),
+             types.KeyboardButton(text="📝 Задания студентов")]
+        ]
+        await message.answer("👨‍🏫 Добро пожаловать, преподаватель!", reply_markup=markup)
+
+    elif user_role == "student":
+        markup.keyboard = [
+            [types.KeyboardButton(text="🔄 Старт"),
+             types.KeyboardButton(text="👨‍🏫 Мой преподаватель")],
+            [types.KeyboardButton(text="📄 Подать заявление"),
+             types.KeyboardButton(text="📝 Мои задания")],
+            [types.KeyboardButton(text="📋 Посмотреть расписание")]
+        ]
+        await message.answer("🎓 Добро пожаловать, студент!", reply_markup=markup)
+
     else:
-        markup = types.ReplyKeyboardMarkup(
-            keyboard=[
-                [
-                    types.KeyboardButton(text="📋 Посмотреть расписание"),
-                    types.KeyboardButton(text="👨‍🏫 Мой преподаватель")
-                ],
-                [types.KeyboardButton(text="📄 Подать заявление")]
-            ],
-            resize_keyboard=True
-        )
-        if user_role:
-            await message.answer(f"📋 Привет! Ваша роль: {user_role}", reply_markup=markup)
-        else:
-            await message.answer("❌ Вы не зарегистрированы в системе", reply_markup=markup)
+        await message.answer("❌ Ваша роль не распознана", reply_markup=types.ReplyKeyboardRemove())
 
 
-@dp.message(F.text == "⚙️ Настройки")
-async def settings_menu(message: types.Message):
-    """Меню настроек с кнопкой старт"""
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="👤 Профиль")],
-            [KeyboardButton(text="🔔 Уведомления")],
-            [KeyboardButton(text="/start")],  # Кнопка старт
-            [KeyboardButton(text="🔙 Главное меню")]
-        ],
-        resize_keyboard=True,
-        is_persistent=True
-    )
+# Обработчик кнопки "Старт" (дублирует функционал /start)
+@dp.message(F.text == "🔄 Старт")
+async def handle_start_button(message: types.Message):
+    # Вызываем тот же обработчик, что и для команды /start
+    await cmd_start(message)
 
-    await message.answer(
-        "⚙️ Настройки системы:",
+
+
+
+async def get_teacher_students(teacher_username: str) -> list[tuple[str, str]]:
+    """
+    Возвращает список студентов преподавателя в формате:
+    [(username1, full_name1), (username2, full_name2), ...]
+
+    Args:
+        teacher_username: Логин преподавателя
+
+    Returns:
+        Список кортежей (username студента, полное имя)
+    """
+    conn = None
+    try:
+        conn = get_db_connection()  # Синхронное подключение (ваш текущий код использует psycopg2)
+        cur = conn.cursor()
+
+        # Запрос для получения студентов преподавателя
+        cur.execute("""
+            SELECT s.username, s.full_name 
+            FROM student_teacher st
+            JOIN users s ON st.student_username = s.username
+            WHERE st.teacher_username = %s
+            ORDER BY s.full_name
+        """, (teacher_username,))
+
+        return cur.fetchall()
+
+    except Error as e:
+        print(f"[Ошибка] Не удалось получить студентов преподавателя {teacher_username}: {e}")
+        return []
+    finally:
+        if conn:
+            conn.close()
+
+
+
+@dp.callback_query(F.data == "assign_new_task")
+async def start_assignment_process(callback: types.CallbackQuery, state: FSMContext):
+    print("Обработчик assign_new_task вызван")
+    """Начинает процесс назначения задания"""
+    teacher_username = callback.from_user.username
+    students = await get_teacher_students(teacher_username)
+
+    if not students:
+        await callback.answer("❌ У вас нет студентов для назначения задания")
+        return
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"{full_name} (@{username})",
+            callback_data=f"select_student_{username}"
+        )]
+        for username, full_name in students
+    ])
+
+    await callback.message.edit_text(
+        "👨‍🎓 Выберите студента для назначения задания:",
         reply_markup=keyboard
     )
+    await state.set_state(AssignmentStates.WAITING_STUDENT_SELECTION)
+    await callback.answer()
 
 
-@dp.message(F.text == "➕ Добавить пользователя")
-async def start_add_user(message: types.Message, state: FSMContext):
-    """Начало процесса добавления нового пользователя"""
-    if message.from_user.username != ADMIN_USERNAME:
-        await message.answer("❌ Доступно только администратору")
-        return
-
-    await state.set_state(AddUserStates.WAITING_USERNAME)
-    await message.answer("👤 Введите username пользователя (без '@'):")
-
-
-@dp.message(AddUserStates.WAITING_USERNAME, F.text)
-async def handle_username(message: types.Message, state: FSMContext):
-    """Обработка введенного username"""
-    if message.from_user.username != ADMIN_USERNAME:
-        await message.answer("❌ Доступно только администратору", reply_markup=types.ReplyKeyboardRemove())
-        await state.clear()
-        return
-
-    username = message.text.strip()
-    if not username:
-        await message.answer("❌ Введите username (без '@')", reply_markup=types.ReplyKeyboardRemove())
-        return
-
-    # Удаляем @ в начале, если он есть
-    if username.startswith('@'):
-        username = username[1:]
-
-    # Проверяем, что username не занят через БД
-    existing_user = await get_user_role_by_username(username)
-    if existing_user and username != ADMIN_USERNAME:
-        await message.answer(f"❌ Пользователь @{username} уже зарегистрирован с ролью {existing_user}",
-                           reply_markup=types.ReplyKeyboardRemove())
-        await state.clear()
-        return
-
-    # Сохраняем username для дальнейшего использования
-    await state.update_data(username=username)
-    await state.set_state(AddUserStates.WAITING_ROLE)
-
-    await message.answer("📋 Выберите роль для добавляемого пользователя:",
-                         reply_markup=types.ReplyKeyboardMarkup(
-                             keyboard=[
-                                 [types.KeyboardButton(text="👨‍🎓 Student")],
-                                 [types.KeyboardButton(text="👩‍🏫 Teacher")],
-                                 [types.KeyboardButton(text="📚 Methodist")],  # Новая кнопка
-                                 [types.KeyboardButton(text="👑 Admin")],
-                                 [types.KeyboardButton(text="🔙 Назад")]
-                             ],
-                             resize_keyboard=True
-                         ))
-
-
-@dp.message(AddUserStates.WAITING_ROLE, F.text)
-async def finish_add_user(message: types.Message, state: FSMContext):
-    """Завершение процесса добавления пользователя"""
-    if message.from_user.username != ADMIN_USERNAME:
-        await message.answer("❌ Доступно только администратору", reply_markup=types.ReplyKeyboardRemove())
-        await state.clear()
-        return
-
-    user_data = await state.get_data()
-    username = user_data.get("username")
-
-    role_text = message.text.strip().lower()
-    if role_text == "student" or role_text == "👨‍🎓 student":
-        role = "student"
-    elif role_text == "teacher" or role_text == "👩‍🏫 teacher":
-        role = "teacher"
-    elif role_text == "admin" or role_text == "👑 admin":
-        role = "admin"
-    elif role_text == "methodist" or role_text == "📚 methodist" or role_text == "методист":
-        role = "methodist"
-    elif role_text == "🔙 назад" or role_text == "назад" or role_text == "back":
-        await message.answer("❌ Отмена операции", reply_markup=types.ReplyKeyboardRemove())
-        await state.clear()
-        return
+@dp.callback_query(
+    AssignmentStates.WAITING_STUDENT_SELECTION,
+    F.data.startswith("select_my_student_") | F.data.startswith("select_student_")
+)
+async def select_student(callback: types.CallbackQuery, state: FSMContext):
+    """Обрабатывает выбор студента (общий для методиста и преподавателя)"""
+    # Определяем тип callback data
+    if callback.data.startswith("select_my_student_"):
+        student_username = callback.data.split("_")[3]  # для преподавателя
     else:
-        await message.answer("❌ Неизвестная роль", reply_markup=types.ReplyKeyboardRemove())
-        await state.clear()
-        return
+        student_username = callback.data.split("_")[2]  # для методиста
 
-    if username is None or role is None:
-        await message.answer("❌ Ошибка при завершении добавления", reply_markup=types.ReplyKeyboardRemove())
-        await state.clear()
-        return
+    await state.update_data(student_username=student_username)
 
-    # Проверяем, что пользователь не пытается добавить самого себя
-    if username == str(message.from_user.username) and message.from_user.username != ADMIN_USERNAME:
-        await message.answer("❌ Вы не можете добавить самого себя!", reply_markup=types.ReplyKeyboardRemove())
-        await state.clear()
-        return
+    # Проверяем роль текущего пользователя
+    user_role = await get_user_role_by_username(callback.from_user.username)
 
-    # Добавляем пользователя в БД
-    full_name = message.from_user.first_name or "Анонимный пользователь"
-    success = await add_user_to_db(username, role, full_name)
+    if user_role == 'teacher':
+        # Для преподавателя сразу переходим к вводу названия задания
+        await callback.message.edit_text(
+            f"✏️ Введите название задания для @{student_username}:",
+            reply_markup=None
+        )
+        await state.set_state(AssignmentStates.WAITING_TITLE)
 
-    if not success:
-        await message.answer("❌ Ошибка при добавлении пользователя в базу данных",
-                             reply_markup=types.ReplyKeyboardRemove())
-        await state.clear()
-        return
+    else:
+        # Для методиста продолжаем стандартный процесс
+        await start_assign_teacher_process(callback.message, state)
 
-    await message.answer(f"""
-✅ Пользователь @{username} добавлен с ролью {role.capitalize()}
+    await callback.answer()
 
-Вернуться в меню /start
-""", reply_markup=types.ReplyKeyboardRemove())
 
+@dp.message(AssignmentStates.WAITING_TITLE)
+async def process_title(message: types.Message, state: FSMContext):
+    """Обрабатывает название задания и переходит к описанию"""
+    title = None if message.text == "-" else message.text
+    await state.update_data(title=title)
+
+
+    # Получаем данные о студенте из состояния
+    data = await state.get_data()
+    student_username = data.get('student_username')
+    title=data.get('title')
+    await message.answer(
+        f"📝 Введите описание задания для @{student_username} (можно пропустить, отправивить '-'):",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    await state.set_state(AssignmentStates.WAITING_DESCRIPTION)
+    await state.update_data(title=title)
+
+@dp.message(AssignmentStates.WAITING_DESCRIPTION)
+async def process_description(message: types.Message, state: FSMContext):
+    """Обрабатывает описание задания"""
+    description = None if message.text == "-" else message.text
+    await state.update_data(description=description)
+
+    await message.answer("📅 Введите срок сдачи задания (в формате ДД.ММ.ГГГГ):")
+    await state.set_state(AssignmentStates.WAITING_DEADLINE)
+
+
+@dp.message(AssignmentStates.WAITING_DEADLINE)
+async def process_deadline(message: types.Message, state: FSMContext):
+    """Обрабатывает срок сдачи задания"""
+    try:
+        deadline = datetime.strptime(message.text, "%d.%m.%Y").date()
+        if deadline < date.today():
+            await message.answer("❌ Срок сдачи не может быть в прошлом. Введите снова:")
+            return
+
+        await state.update_data(deadline=deadline)
+        await message.answer("📎 Прикрепите файл с заданием (PDF/DOCX) или отправьте '-' чтобы пропустить:")
+        await state.set_state(AssignmentStates.WAITING_FILE)
+    except ValueError:
+        await message.answer("❌ Неверный формат даты. Используйте ДД.ММ.ГГГГ. Введите снова:")
+
+
+
+
+
+
+
+
+
+@dp.callback_query(AssignmentStates.CONFIRMATION, F.data == "cancel_assignment")
+async def cancel_assignment(callback: types.CallbackQuery, state: FSMContext):
+    """Отменяет создание задания"""
+    await callback.message.edit_text(
+        "❌ Создание задания отменено",
+        reply_markup=None
+    )
     await state.clear()
+    await callback.answer()
+@dp.callback_query(F.data == "show_my_students")
+async def show_my_students_callback(callback: types.CallbackQuery):
+    """Обработчик кнопки показа студентов"""
+    user_role = await get_user_role_by_username(callback.from_user.username)
+    await show_my_students(callback.message)
+    await callback.answer()
+
+@dp.message(F.text == "👨‍🎓 Мои студенты")
+async def show_my_students(message: types.Message):
+    """Показывает список студентов преподавателя"""
+    teacher_username = message.from_user.username
+
+    # Проверяем, что пользователь действительно преподаватель
+    if await get_user_role_by_username(teacher_username) != 'teacher':
+        await message.answer("❌ Доступно только преподавателям")
+        return
+
+    # Получаем список студентов
+    students = await get_teacher_students(teacher_username)
+
+    if not students:
+        await message.answer("ℹ️ У вас пока нет назначенных студентов")
+        return
+
+    # Формируем сообщение
+    response = ["👨‍🎓 Ваши студенты:"]
+    for idx, (username, full_name) in enumerate(students, 1):
+        response.append(f"{idx}. {full_name} (@{username})")
+
+    # Добавляем кнопки для управления
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📝 Назначить задание", callback_data="assign_task_to_my_student"),
+            InlineKeyboardButton(text="🔄 Обновить список", callback_data="show_my_students")
+        ]
+    ])
+
+    await message.answer("\n".join(response), reply_markup=keyboard)
+@dp.callback_query(F.data == "assign_task_to_my_student")
+async def assign_task_to_my_student(callback: types.CallbackQuery, state: FSMContext):
+    """Начинает процесс назначения задания своему студенту"""
+    teacher_username = callback.from_user.username
+    students = await get_teacher_students(teacher_username)
+
+    if not students:
+        await callback.answer("❌ У вас нет студентов для назначения задания")
+        return
+
+    # Создаем клавиатуру с кнопками для выбора студента
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"{full_name} (@{username})",
+            callback_data=f"select_my_student_{username}"
+        )]
+        for username, full_name in students
+    ])
+
+    await callback.message.edit_text(
+        "👨‍🎓 Выберите студента для назначения задания:",
+        reply_markup=keyboard
+    )
+    await state.set_state(AssignmentStates.WAITING_STUDENT_SELECTION)
+    await callback.answer()
+
+
+@dp.message(F.text == "👨‍🏫 Преподаватели")
+async def show_teachers_list(message: types.Message):
+    """Показывает список всех преподавателей"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Получаем список преподавателей с количеством студентов
+        cur.execute("""
+            SELECT 
+                u.username, 
+                u.full_name,
+                COUNT(st.student_username) as students_count
+            FROM users u
+            LEFT JOIN student_teacher st ON u.username = st.teacher_username
+            WHERE u.role = 'teacher'
+            GROUP BY u.username, u.full_name
+            ORDER BY u.full_name
+        """)
+
+        teachers = cur.fetchall()
+
+        if not teachers:
+            await message.answer("👨‍🏫 В системе пока нет преподавателей")
+            return
+
+        # Формируем сообщение
+        teachers_text = "👨‍🏫 <b>Список преподавателей:</b>\n\n"
+        for teacher in teachers:
+            username, full_name, students_count = teacher
+            teachers_text += (
+                f"👤 <b>{full_name}</b> (@{username})\n"
+                f"👨‍🎓 Студентов: {students_count}\n\n"
+            )
+
+        await message.answer(teachers_text, parse_mode="HTML")
+
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при получении списка преподавателей: {str(e)}")
+    finally:
+        if conn:
+            conn.close()
 
 
 async def get_user_role_by_username(username: str):
@@ -660,30 +805,112 @@ async def get_user_role_by_username(username: str):
 
 
 
+@dp.message(AddUserStates.WAITING_USERNAME, F.text)
+async def handle_username(message: types.Message, state: FSMContext):
+
+    username = message.text.strip()
+    if not username:
+        await message.answer("❌ Введите username (без '@')", reply_markup=types.ReplyKeyboardRemove())
+        return
+
+    # Удаляем @ в начале, если он есть
+    if username.startswith('@'):
+        username = username[1:]
+
+    # Проверяем, что username не занят через БД
+    existing_user = await get_user_role_by_username(username)
+    if existing_user:
+        await message.answer(
+            f"❌ Пользователь @{username} уже зарегистрирован с ролью {existing_user}\n"
+            "Пожалуйста, введите другой username:",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        # Возвращаем в состояние ожидания username
+        await state.set_state(AddUserStates.WAITING_USERNAME)
+        return
+
+    # Сохраняем username для дальнейшего использования
+    await state.update_data(username=username)
+    await state.set_state(AddUserStates.WAITING_ROLE)
+
+    await message.answer("📋 Выберите роль для добавляемого пользователя:",
+                         reply_markup=types.ReplyKeyboardMarkup(
+                             keyboard=[
+                                 [
+                                    types.KeyboardButton(text="👨‍🎓 Студент"),
+                                    types.KeyboardButton(text="👩‍🏫 Преподаватель")
+                                 ],
+                                 [types.KeyboardButton(text="📚 Методист"),
+                                 types.KeyboardButton(text="👑 Администратор")
+                                  ]
+
+                             ],
+                             resize_keyboard=True
+                         ))
+
+
+@dp.message(AddUserStates.WAITING_ROLE, F.text)
+async def finish_add_user(message: types.Message, state: FSMContext):
+
+    user_data = await state.get_data()
+    username = user_data.get("username")
+
+    # Проверяем, что пользователь не пытается добавить самого себя
+    if username == str(message.from_user.username):
+        await message.answer("❌ Вы не можете добавить самого себя!", reply_markup=types.ReplyKeyboardRemove())
+        await state.clear()
+        return
+    if message.text == "👨‍🎓 Студент":
+        role = "student"
+    elif message.text == "👩‍🏫 Преподаватель":
+        role = "teacher"
+    elif message.text == "📚 Методист":
+        role = "methodist"
+    elif message.text == "👑 Администратор":
+        role = "admin"
+
+    success = await add_user_to_db(username, role)
+
+    if not success:
+        await message.answer("❌ Ошибка при добавлении пользователя в базу данных",
+                             reply_markup=types.ReplyKeyboardRemove())
+        await state.clear()
+        return
+
+    await message.answer(f"""
+✅ Пользователь @{username} добавлен с ролью {role.capitalize()}
+
+Вернуться в меню /start
+""", reply_markup=types.ReplyKeyboardRemove())
+
+    await state.clear()
+
 @dp.message(F.text == "👀 Просмотреть пользователей")
 async def cmd_view_users(message: types.Message):
-    """Показать всех пользователей без кнопки обновления"""
-    if message.from_user.username != ADMIN_USERNAME:
-        await message.answer("❌ Доступно только администратору")
-        return
 
     users = await get_all_users()
     if not users:
         await message.answer("📋 Список пользователей пуст.")
         return
 
-    # Формируем список одним блоком
-    content = "📋 Список пользователей системы:\n\n" + "\n".join(
-        f"👑 Администратор:@{u} ({n})" if u == ADMIN_USERNAME else
-        f"✨ {r.capitalize()}:@{u} ({n})" if u == message.from_user.username else
-        f"👤 Пользователь:@{u} ({n}) - Роль: {r.capitalize()}"
-        for u, r, n in users
-    )
+    text = "📌 Список пользователей:\n\n"
 
-    await message.answer(
-        content,
-        parse_mode=ParseMode.HTML
-    )
+    for user in users:
+        username, role, name = user
+
+        if role == "admin":
+            icon = "👑"
+        elif role == "teacher":
+            icon = "👩‍🏫"
+        elif role == "student":
+            icon = "👨‍🎓"
+        else:
+            icon = "👤"
+
+        text += f"{icon} @{username} - {name}\n"
+
+
+    await message.answer(text)
 
 async def get_schedule_list() -> list[tuple]:
     """Возвращает список расписаний из БД"""
@@ -711,7 +938,7 @@ async def get_schedule_list() -> list[tuple]:
         if conn:
             conn.close()
 
-
+@dp.callback_query(F.data == "view_schedule")
 @dp.message(F.text == "📋 Посмотреть расписание")
 async def cmd_view_schedule(message: types.Message):
     """Показывает список доступных расписаний"""
@@ -722,28 +949,37 @@ async def cmd_view_schedule(message: types.Message):
         await message.answer("📅 Расписаний пока нет.")
         return
 
-    response = "📅 Доступные расписания:\n\n"
-
-    for idx, (semester, start_date, end_date, practice, teacher) in enumerate(schedule, 1):
-        response += (
-            f"{idx}. {semester}\n"
-            f"   📆 Период: {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}\n"
-            f"   🏫 Практика: {practice}\n"
-            f"   👨‍🏫 Ответственный: @{teacher}\n\n"
-        )
+    response = "📅 Расписание:\n"
+    for idx, (semester, start, end, practice, teacher) in enumerate(schedule, 1):
+        response += f"{idx}📌 {semester}\n"
+       # response += f"   Период: {start.strftime('%d.%m.%Y')} - {end.strftime('%d.%m.%Y')}\n"
+        response += f"   Практика: {practice}\n"
+        response += f"   Ответственный: @{teacher}\n\n"
 
         # Для студентов добавляем кнопку подачи заявления
-        if user_role == 'student':
-            markup = types.ReplyKeyboardMarkup(
-                keyboard=[
-                    [types.KeyboardButton(text="📄 Подать заявление")],
-                    [types.KeyboardButton(text="🔙 Назад")]
-                ],
-                resize_keyboard=True
-            )
-            await message.answer(response, reply_markup=markup)
-        else:
-            await message.answer(response)
+    if user_role == 'student':
+        # Для студентов добавляем кнопку подачи заявления
+        application_button = InlineKeyboardButton(
+            text="📄 Подать заявление",
+            callback_data="start_application"
+        )
+        markup = InlineKeyboardMarkup(inline_keyboard=[[application_button]])
+        await message.answer(response, reply_markup=markup)
+    else:
+        await message.answer(response)
+
+
+@dp.callback_query(F.data == "start_application")
+async def start_application_callback(callback: types.CallbackQuery, state: FSMContext):
+    message = callback.message
+    await message.answer(
+            "📝 Пожалуйста, прикрепите файл с заявлением (PDF, DOCX):",
+            reply_markup=ReplyKeyboardRemove()
+        )
+    await state.set_state(ApplicationStates.WAITING_APPLICATION_FILE)
+    await callback.answer()
+
+
 async def get_students_list() -> list[str]:
     """Возвращает список username студентов"""
     conn = None
@@ -1205,6 +1441,7 @@ async def get_all_students_with_teachers() -> list[tuple]:
         if conn:
             conn.close()
 
+
 async def get_students_with_teachers_only() -> list[tuple]:
     """Возвращает только студентов с преподавателями"""
     conn = None
@@ -1254,86 +1491,105 @@ async def assign_teacher_menu(callback: types.CallbackQuery):
         reply_markup=keyboard
     )
     await callback.answer()
+
+
 @dp.callback_query(F.data.startswith("assign_student_"))
-async def select_student_for_teacher(callback: types.CallbackQuery):
-    """Обрабатывает выбор студента"""
-    student_username = callback.data.split("_")[2]
-    teachers = await get_teachers_list()
-
-    if not teachers:
-        await callback.answer("❌ Нет доступных преподавателей")
-        return
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=f"{full_name} (@{username})",
-            callback_data=f"confirm_assign_{student_username}_{username}"
-        )]
-        for username, full_name in teachers
-    ])
-
-    await callback.message.edit_text(
-        f"👨‍🏫 Выберите преподавателя для студента @{student_username}:",
-        reply_markup=keyboard
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("confirm_assign_"))
-async def confirm_teacher_assignment(callback: types.CallbackQuery):
-    """Подтверждает назначение преподавателя"""
-    _, _, student_username, teacher_username = callback.data.split("_")
-
-    # Получаем информацию о пользователях
-    student_info = await get_user_info(student_username)
-    teacher_info = await get_user_info(teacher_username)
-
-    if not student_info or not teacher_info:
-        await callback.answer("❌ Ошибка: пользователь не найден")
-        return
-
-    # Сохраняем в базу данных
-    conn = None
+async def select_student_for_teacher(callback: types.CallbackQuery, state: FSMContext):
+    """Обрабатывает выбор студента и переходит к выбору преподавателя"""
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
+        # Правильно парсим callback data: assign_student_<student_username>
+        student_username = callback.data.split("_")[2]
 
-        # Удаляем предыдущее назначение (если есть)
-        cur.execute("""
-            DELETE FROM student_teacher 
-            WHERE student_username = %s
-        """, (student_username,))
+        # Сохраняем student_username в state
+        await state.update_data(student_username=student_username)
 
-        # Добавляем новое назначение
-        cur.execute("""
-            INSERT INTO student_teacher (student_username, teacher_username)
-            VALUES (%s, %s)
-        """, (student_username, teacher_username))
+        # Получаем список преподавателей
+        teachers = await get_teachers_list()
 
-        conn.commit()
+        if not teachers:
+            await callback.answer("❌ Нет доступных преподавателей")
+            return
 
-        # Отправляем уведомления
-        await notify_assignment(student_username, teacher_username)
+        # Создаем клавиатуру с преподавателями
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"{full_name} (@{username})",
+                callback_data=f"assign_teacher_{student_username}_{username}"
+            )]
+            for username, full_name in teachers
+        ])
 
         await callback.message.edit_text(
-            f"✅ Преподаватель @{teacher_username} назначен для студента @{student_username}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="🔙 К списку студентов",
-                    callback_data="refresh_students"
-                )
-            ]])
+            f"👨‍🏫 Выберите преподавателя для студента @{student_username}:",
+            reply_markup=keyboard
         )
+        await callback.answer()
 
-    except Error as e:
-        await callback.message.edit_text(
-            "❌ Ошибка при сохранении назначения",
-            reply_markup=None
-        )
-        print(f"Ошибка назначения преподавателя: {e}")
+    except Exception as e:
+        print(f"Ошибка в select_student_for_teacher: {e}")
+        await callback.answer("❌ Ошибка при выборе студента")
+
+
+# Обработчик подтверждения назначения преподавателя
+@dp.callback_query(AssignTeacherStates.CONFIRM_ASSIGNMENT, F.data == "confirm_assignment")
+async def confirm_teacher_assignment(callback: types.CallbackQuery, state: FSMContext):
+    """Подтверждает назначение преподавателя студенту"""
+    try:
+        data = await state.get_data()
+        student_username = data['student_username']
+        teacher_username = data['teacher_username']
+
+        # Обязательно проверяем наличие данных
+        if not student_username or not teacher_username:
+            await callback.answer("❌ Ошибка: данные неполные", show_alert=True)
+            return
+
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+
+            # Удаляем старую связь
+            cur.execute("DELETE FROM student_teacher WHERE student_username = %s", (student_username,))
+
+            # Добавляем новую связь
+            cur.execute(
+                "INSERT INTO student_teacher (student_username, teacher_username) VALUES (%s, %s)",
+                (student_username, teacher_username)
+            )
+            conn.commit()
+
+            # Уведомляем студента
+            student_chat_id = await get_user_chat_id(student_username)
+            if student_chat_id:
+                teacher_info = await get_user_info(teacher_username)
+                if teacher_info:
+                    await bot.send_message(
+                        chat_id=student_chat_id,
+                        text=f"👨‍🏫 Вам назначен руководитель: {teacher_info['full_name']} (@{teacher_username})"
+                    )
+
+            await callback.message.edit_text(
+                "✅ Преподаватель успешно назначен!",
+                reply_markup=None
+            )
+
+        except Error as e:
+            await callback.message.edit_text(
+                "❌ Ошибка при сохранении назначения",
+                reply_markup=None
+            )
+            print(f"Ошибка БД: {e}")
+        finally:
+            if conn:
+                conn.close()
+            await state.clear()
+
+    except Exception as e:
+        print(f"Ошибка в обработчике подтверждения: {e}")
     finally:
-        if conn:
-            conn.close()
-    await callback.answer()
+        await callback.answer()
+
 
 async def notify_assignment(student_username: str, teacher_username: str):
     """Отправляет уведомления студенту и преподавателю"""
@@ -1353,7 +1609,7 @@ async def notify_assignment(student_username: str, teacher_username: str):
         except Exception as e:
             print(f"Ошибка уведомления студента: {e}")
 
-    # Уведомление преподавателю
+    # Уведомление преподавателюё
     if teacher_chat_id:
         try:
             await bot.send_message(
@@ -1476,71 +1732,155 @@ async def refresh_students_list(callback: types.CallbackQuery):
 async def start_application(message: types.Message, state: FSMContext):
     """Начинает процесс подачи заявления"""
     await message.answer(
-        "📝 Пожалуйста, прикрепите файл с заявлением (PDF, DOCX, JPG, PNG):",
+        "📝 Пожалуйста, прикрепите файл с заявлением (PDF, DOCX):",
         reply_markup=types.ReplyKeyboardRemove()
     )
     await state.set_state(ApplicationStates.WAITING_APPLICATION_FILE)
 
 
-# Обработчик прикрепленного файла
-@dp.message(ApplicationStates.WAITING_APPLICATION_FILE, F.document | F.photo)
-async def handle_application_file(message: types.Message, state: FSMContext, bot: Bot):
-    """Обрабатывает прикрепленный файл заявления с правильным определением типа"""
-    file_info = {
-        'file_id': None,
-        'file_name': "application",
-        'file_type': None  # 'document' или 'photo'
-    }
+@dp.message(
+    AssignmentStates.WAITING_FILE,
+    ApplicationStates.WAITING_APPLICATION_FILE,
+    F.document | F.photo | (F.text & (F.text == "-"))
+)
+async def handle_uploaded_file(message: types.Message, state: FSMContext, bot: Bot):
+    """Универсальный обработчик загружаемых файлов для разных контекстов"""
+    try:
+        current_state = await state.get_state()
+        is_assignment = current_state == AssignmentStates.WAITING_FILE.state
+        is_application = current_state == ApplicationStates.WAITING_APPLICATION_FILE.state
 
-    if message.document:
-        file_info.update({
-            'file_id': message.document.file_id,
-            'file_name': message.document.file_name or "document",
-            'file_type': 'document'
-        })
-    elif message.photo:
-        file_info.update({
-            'file_id': message.photo[-1].file_id,  # Берем самое высокое качество
-            'file_name': f"photo_{message.photo[-1].file_unique_id}.jpg",
-            'file_type': 'photo'
-        })
+        # Получаем текущие данные из состояния
+        data = await state.get_data()
 
-    if not file_info['file_id']:
-        await message.answer("❌ Не удалось получить файл. Попробуйте еще раз.")
-        return
+        # Обработка файла/документа
+        file_info = {
+            'file_id': None,
+            'file_name': None,
+            'file_type': None,
+            'file_content': None
+        }
 
-    # Сохраняем информацию о файле
-    await state.update_data({
-        **file_info,
-        'student_username': message.from_user.username,
-        'student_full_name': message.from_user.full_name
-    })
+        if message.document:
+            if is_assignment:
+                # Проверка форматов только для заданий
+                allowed_types = {
+                    'application/pdf',
+                    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    'application/msword',
+                    'text/plain'
+                }
 
-    # Подтверждение отправки
-    markup = types.ReplyKeyboardMarkup(
-        keyboard=[
-            [types.KeyboardButton(text="✅ Подтвердить отправку")],
-            [types.KeyboardButton(text="❌ Отменить")]
-        ],
-        resize_keyboard=True
-    )
+                if message.document.mime_type not in allowed_types:
+                    await message.answer(
+                        "❌ Поддерживаются только файлы PDF, DOC/DOCX или TXT",
+                        reply_markup=types.ReplyKeyboardRemove()
+                    )
+                    return
 
-    await message.answer(
-        f"📄 Файл '{file_info['file_name']}' ({file_info['file_type']}) готов к отправке методисту.\n"
-        "Подтвердите отправку:",
-        reply_markup=markup
-    )
-    await state.set_state(ApplicationStates.WAITING_APPLICATION_CONFIRM)
+            try:
+                file = await bot.get_file(message.document.file_id)
+                file_bytes = (await bot.download_file(file.file_path)).read()
+                file_info.update({
+                    'file_id': message.document.file_id,
+                    'file_name': message.document.file_name or "document",
+                    'file_type': 'document',
+                    'file_content': file_bytes  # Всегда сохраняем содержимое для заданий
+                })
+            except Exception as e:
+                print(f"Ошибка загрузки файла: {e}")
+                await message.answer(
+                    "❌ Не удалось загрузить файл. Попробуйте снова",
+                    reply_markup=types.ReplyKeyboardRemove()
+                )
+                return
+
+        elif message.photo:
+            # Для фото сохраняем только file_id (не сохраняем содержимое в БД)
+            file_info.update({
+                'file_id': message.photo[-1].file_id,
+                'file_name': f"photo_{message.photo[-1].file_unique_id}.jpg",
+                'file_type': 'photo'
+            })
+
+        elif message.text == "-":
+            file_info.update({
+                'file_name': "не прикреплен",
+                'file_type': 'none'
+            })
+
+        else:
+            await message.answer("❌ Поддерживаются только документы или фото")
+            return
+
+        # Обновляем состояние
+        await state.update_data(**file_info)
+
+        # Формируем текст подтверждения в зависимости от контекста
+        if is_assignment:
+            # Проверяем обязательные поля для заданий
+            required_fields = ['student_username', 'title', 'description', 'deadline']
+            missing_fields = [field for field in required_fields if field not in data]
+
+            if missing_fields:
+                error_msg = "❌ Ошибка: отсутствуют данные задания:\n" + "\n".join(
+                    f"• {field}" for field in missing_fields)
+                await message.answer(error_msg, reply_markup=types.ReplyKeyboardRemove())
+                await state.clear()
+                return
+
+            confirm_text = (
+                "📋 Подтвердите данные задания:\n\n"
+                f"👨‍🎓 Студент: @{data['student_username']}\n"
+                f"📌 Название: {data['title']}\n"
+                f"📝 Описание: {data['description'] or 'не указано'}\n"
+                f"📅 Срок сдачи: {data['deadline'].strftime('%d.%m.%Y')}\n"
+                f"📎 Файл: {file_info['file_name']}"
+            )
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_assignment"),
+                InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_assignment")
+            ]])
+
+            next_state = AssignmentStates.CONFIRMATION
+
+        elif is_application:
+            # Для заявок не сохраняем содержимое файла в БД
+            confirm_text = (
+                f"📄 Файл '{file_info['file_name']}' готов к отправке методисту.\n"
+                "Подтвердите отправку:"
+            )
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="✅ Подтвердить отправку", callback_data="confirm_application"),
+                InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_application")
+            ]])
+
+            next_state = ApplicationStates.WAITING_APPLICATION_CONFIRM
+
+        await message.answer(confirm_text, reply_markup=keyboard)
+        await state.set_state(next_state)
+
+    except Exception as e:
+        print(f"Ошибка обработки файла: {e}")
+        await message.answer(
+            "❌ Произошла ошибка при обработке файла. Попробуйте еще раз",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.clear()
 
 
-# Обработчик подтверждения отправки
-@dp.message(ApplicationStates.WAITING_APPLICATION_CONFIRM, F.text == "✅ Подтвердить отправку")
-async def confirm_application(message: types.Message, state: FSMContext, bot: Bot):
+
+@dp.callback_query(ApplicationStates.WAITING_APPLICATION_CONFIRM, F.data == "confirm_application")
+async def confirm_application(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
+    """Обработчик подтверждения отправки заявления с возвратом в меню"""
     data = await state.get_data()
     methodists = await get_methodists_list()
+    user_role = await get_user_role_by_username(callback.from_user.username)
 
     if not methodists:
-        await message.answer("❌ В системе нет методистов для обработки заявки")
+        await callback.message.edit_text("❌ В системе нет методистов для обработки заявки")
         await state.clear()
         return
 
@@ -1571,20 +1911,79 @@ async def confirm_application(message: types.Message, state: FSMContext, bot: Bo
             print(f"Ошибка отправки методисту {methodist_username} (chat_id: {methodist_chat_id}): {e}")
             continue
 
+    # Формируем клавиатуру в зависимости от роли пользователя
+    if user_role == 'student':
+        markup = ReplyKeyboardMarkup(
+            keyboard=[
+                         [
+                             types.KeyboardButton(text="👨‍🏫 Мой преподаватель"),
+                             types.KeyboardButton(text="📄 Подать заявление")
+                         ],
+                         [
+                             types.KeyboardButton(text="📝 Мои задания")
+                         ]
+                     ] ,
+            resize_keyboard=True
+        )
+
+    else:
+        markup = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="🔄 Старт")]
+            ],
+            resize_keyboard=True
+        )
+
     if success > 0:
-        await message.answer(
+        await callback.message.answer(
             f"✅ Ваше заявление отправлено {success} методистам!",
-            reply_markup=types.ReplyKeyboardRemove()
+            reply_markup=markup
         )
     else:
-        await message.answer(
+        await callback.message.answer(
             "❌ Не удалось отправить заявление ни одному методисту",
-            reply_markup=types.ReplyKeyboardRemove()
+            reply_markup=markup
         )
 
     await state.clear()
-#тест пуш
-# Новая функция для получения информации о пользователе
+    await callback.answer()
+
+
+@dp.callback_query(ApplicationStates.WAITING_APPLICATION_CONFIRM, F.data == "cancel_application")
+async def cancel_application(callback: types.CallbackQuery, state: FSMContext):
+    """Обработчик отмены заявления с возвратом в меню"""
+    user_role = await get_user_role_by_username(callback.from_user.username)
+
+    # Формируем клавиатуру в зависимости от роли
+    if user_role == 'student':
+        markup = ReplyKeyboardMarkup(
+            keyboard=[
+                         [
+                             types.KeyboardButton(text="👨‍🏫 Мой преподаватель"),
+                             types.KeyboardButton(text="📄 Подать заявление")
+                         ],
+                         [
+                             types.KeyboardButton(text="📝 Мои задания")
+                         ]
+                     ] ,
+            resize_keyboard=True
+        )
+    else:
+        markup = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="🔄 Старт")]
+            ],
+            resize_keyboard=True
+        )
+
+    await callback.message.answer(
+        "❌ Отправка заявления отменена",
+        reply_markup=markup
+    )
+    await state.clear()
+    await callback.answer()
+
+
 async def get_user_info(username: str) -> dict:
     """Возвращает информацию о пользователе из БД"""
     conn = None
@@ -1619,6 +2018,53 @@ async def cancel_application(message: types.Message, state: FSMContext):
     await state.clear()
 
 
+@dp.message(F.text == "📝 Мои задания")
+async def show_my_assignments(message: types.Message):
+    """Показывает задания текущего студента"""
+    student_username = message.from_user.username
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Получаем все задания студента
+        cur.execute("""
+            SELECT title, description, deadline, status, file_name 
+            FROM assignment_tasks 
+            WHERE student_username = %s
+            ORDER BY deadline
+        """, (student_username,))
+
+        tasks = cur.fetchall()
+
+        if not tasks:
+            await message.answer("📭 У вас пока нет заданий")
+            return
+
+        # Формируем сообщение
+        tasks_text = "📋 Ваши задания:\n\n"
+        for task in tasks:
+            title, description, deadline, status, file_name = task
+            days_left = (deadline - datetime.now().date()).days
+
+            status_icon = "✅" if status == "completed" else "🕒" if status == "in_progress" else "❗"
+            tasks_text += f"{status_icon} <b>{title}</b>\n"
+            if description:
+                tasks_text += f"📝 Описание: {description}\n"
+            tasks_text += f"📅 Срок: {deadline.strftime('%d.%m.%Y')} ({days_left} дней)\n"
+            if file_name:
+                tasks_text += f"📎 Файл: {file_name}\n"
+            tasks_text += "\n"
+
+        await message.answer(tasks_text, parse_mode="HTML")
+
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+    finally:
+        if conn:
+            conn.close()
+
+
 # Новая функция для получения списка методистов
 async def get_methodists_list() -> list[tuple]:
     """Возвращает список методистов с chat_id"""
@@ -1639,33 +2085,117 @@ async def get_methodists_list() -> list[tuple]:
         if conn:
             conn.close()
 
+async def user_exists(username: str) -> bool:
+    """Проверяет существование пользователя в БД"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM users WHERE username = %s", (username,))
+        return bool(cur.fetchone())
+    except Error as e:
+        print(f"Ошибка проверки пользователя: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
 
-# Обработчик для методиста при получении заявления
-@dp.message(F.document | F.photo)
-async def handle_application_from_student(message: types.Message, state: FSMContext):
-    """Обрабатывает заявление от студента для методиста"""
-    user_role = await get_user_role_by_username(message.from_user.username)
 
-    if user_role != 'methodist':
-        return  # Только для методистов
-
-    # Проверяем, есть ли подпись с username студента
-    if message.caption and '@' in message.caption:
-        student_username = None
-        for part in message.caption.split():
-            if part.startswith('@'):
-                student_username = part[1:]
-                break
-
-        if student_username:
-            await state.update_data(student_username=student_username)
-            await start_assign_teacher_process(message, state)
+@dp.callback_query(F.data.startswith("assign_teacher_"))
+async def assign_teacher_handler(callback: types.CallbackQuery, state: FSMContext = None):
+    """Унифицированный обработчик назначения преподавателя"""
+    try:
+        # Проверяем и парсим данные из callback
+        parts = callback.data.split('_')
+        if len(parts) != 4:
+            await callback.answer("❌ Неверный формат данных callback", show_alert=True)
             return
 
-    # Если username не найден, предлагаем выбрать студента вручную
-    await message.answer("Выберите студента для назначения руководителя:")
-    await show_students_list(message, state)
-    await state.set_state(AssignTeacherStates.WAITING_STUDENT_SELECTION)
+        student_username = parts[2]  # Третий элемент - student
+        teacher_username = parts[3]  # Четвертый элемент - teacher ДВА ДНЯ на это убила, капец
+
+        # Проверяем существование пользователей в базе
+        if not await user_exists(student_username):
+            await callback.answer(f"❌ Студент @{student_username} не найден", show_alert=True)
+            return
+
+        if not await user_exists(teacher_username):
+            await callback.answer(f"❌ Преподаватель @{teacher_username} не найден", show_alert=True)
+            return
+
+        # Проверяем, что teacher_username действительно преподаватель
+        teacher_role = await get_user_role_by_username(teacher_username)
+        if teacher_role != 'teacher':
+            await callback.answer(f"❌ @{teacher_username} не является преподавателем", show_alert=True)
+            return
+
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+
+            # Удаляем старую связь (если есть)
+            cur.execute("""
+                DELETE FROM student_teacher 
+                WHERE student_username = %s
+            """, (student_username,))
+
+            # Добавляем новую связь
+            cur.execute("""
+                INSERT INTO student_teacher 
+                (student_username, teacher_username)
+                VALUES (%s, %s)
+            """, (student_username, teacher_username))
+
+            conn.commit()
+
+            # Получаем информацию для уведомлений
+            teacher_info = await get_user_info(teacher_username)
+            student_info = await get_user_info(student_username)
+
+            # Уведомляем студента
+            student_chat_id = await get_user_chat_id(student_username)
+            if student_chat_id and teacher_info:
+                try:
+                    await bot.send_message(
+                        chat_id=student_chat_id,
+                        text=f"👨‍🏫 Вам назначен руководитель практики: {teacher_info['full_name']} (@{teacher_username})"
+                    )
+                except Exception as e:
+                    print(f"Ошибка уведомления студента: {e}")
+
+            # Уведомляем преподавателя
+            teacher_chat_id = await get_user_chat_id(teacher_username)
+            if teacher_chat_id and student_info:
+                try:
+                    await bot.send_message(
+                        chat_id=teacher_chat_id,
+                        text=f"👨‍🎓 Вам назначен студент: {student_info['full_name']} (@{student_username})"
+                    )
+                except Exception as e:
+                    print(f"Ошибка уведомления преподавателя: {e}")
+
+            await callback.message.edit_text(
+                f"✅ Руководитель {teacher_info['full_name']} назначен студенту @{student_username}",
+                reply_markup=None
+            )
+
+        except Error as e:
+            await callback.message.edit_text(
+                "❌ Ошибка при назначении преподавателя",
+                reply_markup=None
+            )
+            print(f"Ошибка БД: {e}")
+        finally:
+            if conn:
+                conn.close()
+    except Exception as e:
+        print(f"Ошибка в обработчике назначения преподавателя: {e}")
+    finally:
+        if state:
+            await state.clear()
+        await callback.answer()
+
 
 
 async def show_students_list(message: types.Message, state: FSMContext):
@@ -1726,22 +2256,14 @@ async def start_assign_teacher_process(message: types.Message, state: FSMContext
     await state.set_state(AssignTeacherStates.WAITING_TEACHER_SELECTION)
 
 
-# Обработчик выбора студента
-@dp.callback_query(AssignTeacherStates.WAITING_STUDENT_SELECTION, F.data.startswith("assign_student_"))
-async def process_student_selection(callback: types.CallbackQuery, state: FSMContext):
-    """Обрабатывает выбор студента"""
-    student_username = callback.data.split("_")[2]
-    await state.update_data(student_username=student_username)
 
-    await callback.message.edit_text(f"Выбран студент: @{student_username}")
-    await start_assign_teacher_process(callback.message, state)
-    await callback.answer()
 
 
 # Обработчик выбора преподавателя
 @dp.callback_query(AssignTeacherStates.WAITING_TEACHER_SELECTION, F.data.startswith("assign_teacher_"))
 async def process_teacher_selection(callback: types.CallbackQuery, state: FSMContext):
     """Обрабатывает выбор преподавателя"""
+
     teacher_username = callback.data.split("_")[2]
     data = await state.get_data()
     student_username = data.get('student_username')
@@ -1779,71 +2301,115 @@ async def process_teacher_selection(callback: types.CallbackQuery, state: FSMCon
 
     await callback.message.edit_text(confirm_text, reply_markup=keyboard)
     await state.set_state(AssignTeacherStates.CONFIRM_ASSIGNMENT)
+    await state.update_data(teacher_username=teacher_username, student_username=student_username)
+
     await callback.answer()
+# Добавляем новую функцию для получения файла задания из базы
 
 
-# Обработчик подтверждения назначения
-@dp.callback_query(AssignTeacherStates.CONFIRM_ASSIGNMENT, F.data == "confirm_assignment")
-async def confirm_assignment(callback: types.CallbackQuery, state: FSMContext):
-    """Подтверждает назначение преподавателя"""
+@dp.message(F.document.mime_type.in_([
+    'application/pdf',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+]))
+async def handle_template_upload(
+        message: types.Message,
+        state: FSMContext,
+        bot: Bot
+):
+    """Обработчик загрузки файла задания с сохранением в БД"""
+    # Получаем данные из состояния FSM
+    user_role = await get_user_role_by_username(message.from_user.username)
     data = await state.get_data()
-    student_username = data.get('student_username')
-    teacher_username = data.get('teacher_username')
+    if user_role != "student": #записывается заявление,его надо в другую таблицу
+        # Проверяем наличие обязательных полей
+        if not all(key in data for key in ['student_username', 'title', 'deadline']):
+            missing = [key for key in ['student_username', 'title', 'deadline'] if key not in data]
+            await message.answer(f"❌ Отсутствуют данные: {', '.join(missing)}")
+            return
 
-    if not student_username or not teacher_username:
-        await callback.answer("❌ Ошибка: данные неполные")
-        await state.clear()
-        return
+    if user_role != "student":
+        conn = None
+        try:
+            # Извлекаем данные из состояния
+            student_username = data['student_username']
+            title = data['title']
 
-    # Сохраняем в базу данных
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
+            description = data.get('description', '')
 
-        # Удаляем предыдущее назначение (если есть)
-        cur.execute("""
-            DELETE FROM student_teacher 
-            WHERE student_username = %s
-        """, (student_username,))
+            # Парсинг даты
+            deadline = data['deadline']
 
-        # Добавляем новое назначение
-        cur.execute("""
-            INSERT INTO student_teacher (student_username, teacher_username)
-            VALUES (%s, %s)
-        """, (student_username, teacher_username))
+            # Загрузка файла
+            file = await bot.get_file(message.document.file_id)
+            file_bytes = (await bot.download_file(file.file_path)).read()
 
-        conn.commit()
-
-        # Отправляем уведомление студенту
-        student_chat_id = await get_user_chat_id(student_username)
-        teacher_info = await get_user_info(teacher_username)
-
-        if student_chat_id:
+            # Сохранение в БД
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO assignment_tasks (
+                    student_username, teacher_username, title,
+                    description, deadline, file_name, file_content
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (
+                student_username,
+                message.from_user.username,
+                title,
+                description,
+                deadline,
+                message.document.file_name,
+                file_bytes
+            ))
+            conn.commit()
+            # Ищем chat_id студента
+            cur.execute("SELECT chat_id FROM users WHERE username = %s", (student_username,))
+            student_data = cur.fetchone()
+            chat_id = student_data[0]
+            # Уведомление студента
             try:
                 await bot.send_message(
-                    chat_id=student_chat_id,
-                    text=f"👨‍🏫 Вам назначен руководитель практики: {teacher_info['full_name']} (@{teacher_username})"
+                    chat_id=chat_id,
+                    text=f"📌 Новое задание: {title}\n"
+                         f"📅 Срок: {deadline}\n"
+                         f"📎 Файл: {message.document.file_name}"
                 )
             except Exception as e:
-                print(f"Ошибка отправки уведомления студенту: {e}")
+                print(f"Ошибка уведомления: {e}")
 
-        await callback.message.edit_text(
-            "✅ Руководитель практики успешно назначен!",
-            reply_markup=None
-        )
+            # Ответ пользователю
+            await message.answer(
+                f"""✅ Задание успешно загружено!
+    Файл: {message.document.file_name}
+    Размер: {len(file_bytes) / 1024:.1f} KB\n 
+    Вы можете вернуться в меню /start"""
+            )
 
-    except Error as e:
-        await callback.message.edit_text(
-            "❌ Ошибка при сохранении назначения",
-            reply_markup=None
-        )
-        print(f"Ошибка назначения руководителя: {e}")
-    finally:
-        if conn:
-            conn.close()
-        await state.clear()
-    await callback.answer()
+        except ValueError:
+            await message.answer("❌ Неверный формат даты! Используйте ДД.ММ.ГГГГ")
+        except Exception as e:
+            await message.answer(f"❌ Ошибка при загрузке: {str(e)}")
+            print(f"Ошибка: {e}")
+        finally:
+            if conn:
+                conn.close()
+            await state.clear()
+    else:
+        await message.answer(
+            f"""✅ Заявление успешно загружено!
+  Вы можете вернуться в меню /start"""
+)
+@dp.message(F.document)
+async def handle_wrong_file_type(message: types.Message):
+    """Обработчик неподдерживаемых форматов"""
+    if message.document.mime_type not in [
+        'application/pdf',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    ]:
+        await message.answer("""
+        ❌ Неподдерживаемый формат файла.
+        Пожалуйста, отправьте файл в формате PDF или DOCX.
+        """)
+
 
 
 # Обработчик отмены назначения
@@ -1876,6 +2442,50 @@ async def get_user_chat_id(username: str) -> int:
         if conn:
             conn.close()
 
+
+
+@dp.message(F.text == "📝 Задания студентов")
+async def show_student_tasks(message: types.Message):
+
+    """Показываем задания текущего преподавателя"""
+    teacher_username = message.from_user.username
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Получаем все задания преподавателя
+        cur.execute("""
+            SELECT title, deadline, status 
+            FROM assignment_tasks 
+            WHERE teacher_username = %s
+            ORDER BY deadline
+        """, (teacher_username,))
+
+        tasks = cur.fetchall()
+
+        if not tasks:
+            await message.answer("📭 У вас пока нет заданий для студентов")
+            return
+
+        # Формируем сообщение
+        tasks_text = "📋 Ваши задания для студентов:\n\n"
+        for task in tasks:
+            title, deadline, status = task
+            days_left = (deadline - datetime.now().date()).days
+
+            status_icon = "🟢" if status == "completed" else "🟡" if status == "in_progress" else "🔴"
+            tasks_text += f"{status_icon} {title}\n"
+            tasks_text += f"📅 До дедлайна: {days_left} дней\n"
+            tasks_text += f"⏳ Статус: {status}\n\n"
+
+        await message.answer(tasks_text)
+
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+    finally:
+        if conn:
+            conn.close()
 
 # Обработчик кнопки "Мой преподаватель"
 @dp.message(F.text == "👨‍🏫 Мой преподаватель")
@@ -1913,9 +2523,12 @@ async def show_my_teacher(message: types.Message):
         if conn:
             conn.close()
 
+
+
+
 # Запуск бота
 async def main():
-    print(f"Бот запущен. Администратор: @{ADMIN_USERNAME}")
+    print(f"Бот запущен")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
