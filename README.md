@@ -136,5 +136,5 @@ CREATE TABLE student_applications (
 ## 🚀 Не забудь
 
 Настроить конфигурацию:
-API_TOKEN
-DB_CONFIG
+- API_TOKEN
+- DB_CONFIG
