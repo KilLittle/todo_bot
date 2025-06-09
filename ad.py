@@ -483,7 +483,7 @@ async def show_main_menu(message: types.Message, user_role: str):
     """Показывает главное меню в зависимости от роли"""
     markup = types.ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
 
-    if user_role == "admin":
+    if user_role == "admin" or user_role == "teacher":
         markup.keyboard = [
             [types.KeyboardButton(text="🔄 Старт"),
              types.KeyboardButton(text="➕ Добавить пользователя")],
@@ -491,7 +491,7 @@ async def show_main_menu(message: types.Message, user_role: str):
         ]
         await message.answer("✨ Добро пожаловать, администратор!", reply_markup=markup)
 
-    elif user_role == "methodist":
+    elif user_role == "methodist" or user_role == "teacher":
         markup.keyboard = [
             [types.KeyboardButton(text="🔄 Старт"),
              types.KeyboardButton(text="📋 Посмотреть расписание")],
