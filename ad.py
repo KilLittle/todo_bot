@@ -536,7 +536,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
         cur.execute("""
             INSERT INTO users (username, role, full_name, chat_id)
-            VALUES (%s, 'student', %s, %s)
+            VALUES (%s, %s, %s)
             ON CONFLICT (username) 
             DO UPDATE SET 
                 chat_id = EXCLUDED.chat_id,
@@ -547,6 +547,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
             message.chat.id
         ))
         conn.commit()
+        await handle_first_login(message, state)
+        return
     except Error as e:
         print(f"Ошибка сохранения данных: {e}")
         await message.answer("⚠️ Произошла ошибка при обновлении данных")
