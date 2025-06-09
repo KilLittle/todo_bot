@@ -558,9 +558,9 @@ async def cmd_start(message: types.Message, state: FSMContext):
             if conn:
                 conn.close()
     else:
-        # Если пользователь уже имеет роль - показываем главное меню
-    await show_main_menu(message, user_role)
-    print("тут")
+    # Если пользователь уже имеет роль - показываем главное меню
+        await show_main_menu(message, user_role)
+        print("тут")
 
 
 
