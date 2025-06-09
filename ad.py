@@ -504,8 +504,19 @@ async def show_main_menu(message: types.Message, user_role: str):
 
     elif user_role == "teacher":
         markup.keyboard = [
+            # Кнопки администратора
             [types.KeyboardButton(text="🔄 Старт"),
-             types.KeyboardButton(text="📋 Посмотреть расписание")],
+             types.KeyboardButton(text="➕ Добавить пользователя")],
+            [types.KeyboardButton(text="👀 Просмотреть пользователей")],
+            
+            # Кнопки методиста
+            [types.KeyboardButton(text="📋 Посмотреть расписание")],
+            [types.KeyboardButton(text="📅 Добавить расписание"),
+             types.KeyboardButton(text="📢 Рассылка студентам")],
+            [types.KeyboardButton(text="👨‍🎓 Список студентов"),
+             types.KeyboardButton(text="👨‍🏫 Преподаватели")],
+            
+            # Свои кнопки преподавателя
             [types.KeyboardButton(text="👨‍🎓 Мои студенты"),
              types.KeyboardButton(text="📝 Задания студентов")]
         ]
