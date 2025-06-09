@@ -469,7 +469,7 @@ async def process_role_selection(message: types.Message, state: FSMContext):
     full_name = message.from_user.full_name or "Не указано"
     
     # Сохраняем пользователя в базу
-    success = await add_user_to_db(username, role, full_name, message.chat.id)
+    success = await add_user_to_db(username, role, full_name)
     
     if not success:
         await message.answer("❌ Ошибка при сохранении данных. Попробуйте позже.")
@@ -527,6 +527,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     
     if user_role is None:
         # Сохраняем только базовые данные без указания роли
+        print("тут")
         conn = None
         try:
             conn = get_db_connection()
@@ -548,7 +549,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
             # Перенаправляем на выбор роли
             await handle_first_login(message, state)
             return
-            
+
         except Error as e:
             print(f"Ошибка сохранения данных: {e}")
             await message.answer("⚠️ Произошла ошибка при обновлении данных")
@@ -556,9 +557,11 @@ async def cmd_start(message: types.Message, state: FSMContext):
         finally:
             if conn:
                 conn.close()
-    
-    # Если пользователь уже имеет роль - показываем главное меню
+    else:
+        # Если пользователь уже имеет роль - показываем главное меню
     await show_main_menu(message, user_role)
+    print("тут")
+
 
 
 
