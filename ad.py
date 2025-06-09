@@ -523,93 +523,43 @@ async def show_main_menu(message: types.Message, user_role: str):
         
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-     user_role = await get_user_role_by_username(message.from_user.username)
+    user_role = await get_user_role_by_username(message.from_user.username)
     
     if user_role is None:
-        await handle_first_login(message, state)  # Передаём state
-        return
-        
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-
-        cur.execute("""
-            INSERT INTO users (username, role, full_name, chat_id)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (username) 
-            DO UPDATE SET 
-                chat_id = EXCLUDED.chat_id,
-                full_name = EXCLUDED.full_name
-        """, (
-            message.from_user.username,
-            message.from_user.full_name or "Аноним",
-            message.chat.id
-        ))
-        conn.commit()
-        await handle_first_login(message, state)
-        return
-    except Error as e:
-        print(f"Ошибка сохранения данных: {e}")
-        await message.answer("⚠️ Произошла ошибка при обновлении данных")
-        return
-    finally:
-        if conn:
-            conn.close()
-
-
-    try:
-        user_role = await get_user_role_by_username(message.from_user.username)
-        if not user_role:
-            await message.answer("❌ Ваш профиль не найден в системе")
+        # Сохраняем только базовые данные без указания роли
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO users (username, full_name, chat_id)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (username) 
+                DO UPDATE SET 
+                    chat_id = EXCLUDED.chat_id,
+                    full_name = EXCLUDED.full_name
+            """, (
+                message.from_user.username,
+                message.from_user.full_name or "Аноним",
+                message.chat.id
+            ))
+            conn.commit()
+            
+            # Перенаправляем на выбор роли
+            await handle_first_login(message, state)
             return
-    except Exception as e:
-        print(f"Ошибка получения роли: {e}")
-        await message.answer("⚠️ Ошибка при проверке вашей роли")
-        return
+            
+        except Error as e:
+            print(f"Ошибка сохранения данных: {e}")
+            await message.answer("⚠️ Произошла ошибка при обновлении данных")
+            return
+        finally:
+            if conn:
+                conn.close()
+    
+    # Если пользователь уже имеет роль - показываем главное меню
+    await show_main_menu(message, user_role)
 
-    markup = types.ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-
-    if user_role == "admin":
-        markup.keyboard = [
-            [types.KeyboardButton(text="🔄 Старт"),
-             types.KeyboardButton(text="➕ Добавить пользователя")],
-            [types.KeyboardButton(text="👀 Просмотреть пользователей")]
-        ]
-        await message.answer("✨ Добро пожаловать, администратор!", reply_markup=markup)
-
-    elif user_role == "methodist":
-        markup.keyboard = [
-            [types.KeyboardButton(text="🔄 Старт"),
-             types.KeyboardButton(text="📋 Посмотреть расписание")],
-            [types.KeyboardButton(text="📅 Добавить расписание"),
-             types.KeyboardButton(text="📢 Рассылка студентам")],
-            [types.KeyboardButton(text="👨‍🎓 Список студентов"),
-             types.KeyboardButton(text="👨‍🏫 Преподаватели")]
-        ]
-        await message.answer("📚 Добро пожаловать, методист!", reply_markup=markup)
-
-    elif user_role == "teacher":
-        markup.keyboard = [
-            [types.KeyboardButton(text="🔄 Старт"),
-             types.KeyboardButton(text="📋 Посмотреть расписание")],
-            [types.KeyboardButton(text="👨‍🎓 Мои студенты"),
-             types.KeyboardButton(text="📝 Задания студентов")]
-        ]
-        await message.answer("👨‍🏫 Добро пожаловать, преподаватель!", reply_markup=markup)
-
-    elif user_role == "student":
-        markup.keyboard = [
-            [types.KeyboardButton(text="🔄 Старт"),
-             types.KeyboardButton(text="👨‍🏫 Мой преподаватель")],
-            [types.KeyboardButton(text="📄 Подать заявление"),
-             types.KeyboardButton(text="📝 Мои задания")],
-            [types.KeyboardButton(text="📋 Посмотреть расписание")]
-        ]
-        await message.answer("🎓 Добро пожаловать, студент!", reply_markup=markup)
-
-    else:
-        await message.answer("❌ Ваша роль не распознана", reply_markup=types.ReplyKeyboardRemove())
 
 
 # Обработчик кнопки "Старт" (дублирует функционал /start)
