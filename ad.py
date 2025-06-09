@@ -17,7 +17,7 @@ API_TOKEN = "8010104498:AAFu41LIYHrPWWl-kvT1pQ0GZrxE8AL0wZE"
 ADMIN_USERNAME = ""
 DATE_FORMAT = "%d.%m.%Y"
 # Настройки БД
-conn = psycopg2.connect(
+DB_CONFIG = psycopg2.connect(
     host="localhost",
     database="todo_db",
     user="todo_bot",
