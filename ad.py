@@ -522,7 +522,7 @@ async def show_main_menu(message: types.Message, user_role: str):
         await message.answer("🎓 Добро пожаловать, студент!", reply_markup=markup)
         
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext):
+async def cmd_start(message: types.Message, state: FSMContext): 
     user_role = await get_user_role_by_username(message.from_user.username)
     
     if user_role is None:
