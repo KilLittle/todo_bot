@@ -17,13 +17,14 @@ API_TOKEN = "8010104498:AAFu41LIYHrPWWl-kvT1pQ0GZrxE8AL0wZE"
 ADMIN_USERNAME = ""
 DATE_FORMAT = "%d.%m.%Y"
 # Настройки БД
-DB_CONFIG = psycopg2.connect(
-    host="localhost",
-    database="todo_db",
-    user="todo_bot",
-    password="secure_password_123!",
-    port="5432"
-)
+DB_CONFIG = {
+    "host": "localhost",
+    "database": "todo_db",
+    "user": "todo_bot",
+    "password": "secure_password_123!",
+    "port": "5432"
+}
+
 
 # Инициализация
 bot = Bot(
