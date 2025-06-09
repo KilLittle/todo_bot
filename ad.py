@@ -35,15 +35,21 @@ dp = Dispatcher()
 
 
 # Функции для работы с БД
+
 def get_db_connection():
     """Установка соединения с PostgreSQL"""
     try:
-        conn = get_db_connection()
+        conn = psycopg2.connect(
+            host="localhost",
+            database="todo_db",
+            user="todo_bot",
+            password="secure_password_123!",
+            port="5432"
+        )
         return conn
     except Error as e:
-        print(f"Ошибка подключения к PostgreSQL: {e}")
+        print(f"Ошибка подключения: {e}")
         return None
-
 
 
 
