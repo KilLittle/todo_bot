@@ -434,10 +434,101 @@ async def get_all_users():
         if conn is not None:
             conn.close()
 
+async def handle_first_login(message: types.Message, state: FSMContext):
+    """Обработка первого входа пользователя"""
+    role_keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="👨‍🎓 Я студент"), KeyboardButton(text="👩‍🏫 Я преподаватель")],
+            [KeyboardButton(text="📚 Я методист"), KeyboardButton(text="👑 Я администратор")]
+        ],
+        resize_keyboard=True
+    )
+    
+    await message.answer(
+        "👋 Добро пожаловать! Пожалуйста, выберите вашу роль:",
+        reply_markup=role_keyboard
+    )
+    await state.set_state(AddUserStates.WAITING_ROLE)
 
+@dp.message(AddUserStates.WAITING_ROLE)
+async def process_role_selection(message: types.Message, state: FSMContext):
+    """Обрабатывает выбор роли при первом входе"""
+    role_mapping = {
+        "👨‍🎓 Я студент": "student",
+        "👩‍🏫 Я преподаватель": "teacher",
+        "📚 Я методист": "methodist",
+        "👑 Я администратор": "admin"
+    }
+    
+    if message.text not in role_mapping:
+        await message.answer("❌ Пожалуйста, выберите роль из предложенных вариантов")
+        return
+    
+    role = role_mapping[message.text]
+    username = message.from_user.username
+    full_name = message.from_user.full_name or "Не указано"
+    
+    # Сохраняем пользователя в базу
+    success = await add_user_to_db(username, role, full_name, message.chat.id)
+    
+    if not success:
+        await message.answer("❌ Ошибка при сохранении данных. Попробуйте позже.")
+        await state.clear()
+        return
+    
+    # Показываем основное меню
+    await show_main_menu(message, role)
+    await state.clear()
+async def show_main_menu(message: types.Message, user_role: str):
+    """Показывает главное меню в зависимости от роли"""
+    markup = types.ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+
+    if user_role == "admin":
+        markup.keyboard = [
+            [types.KeyboardButton(text="🔄 Старт"),
+             types.KeyboardButton(text="➕ Добавить пользователя")],
+            [types.KeyboardButton(text="👀 Просмотреть пользователей")]
+        ]
+        await message.answer("✨ Добро пожаловать, администратор!", reply_markup=markup)
+
+    elif user_role == "methodist":
+        markup.keyboard = [
+            [types.KeyboardButton(text="🔄 Старт"),
+             types.KeyboardButton(text="📋 Посмотреть расписание")],
+            [types.KeyboardButton(text="📅 Добавить расписание"),
+             types.KeyboardButton(text="📢 Рассылка студентам")],
+            [types.KeyboardButton(text="👨‍🎓 Список студентов"),
+             types.KeyboardButton(text="👨‍🏫 Преподаватели")]
+        ]
+        await message.answer("📚 Добро пожаловать, методист!", reply_markup=markup)
+
+    elif user_role == "teacher":
+        markup.keyboard = [
+            [types.KeyboardButton(text="🔄 Старт"),
+             types.KeyboardButton(text="📋 Посмотреть расписание")],
+            [types.KeyboardButton(text="👨‍🎓 Мои студенты"),
+             types.KeyboardButton(text="📝 Задания студентов")]
+        ]
+        await message.answer("👨‍🏫 Добро пожаловать, преподаватель!", reply_markup=markup)
+
+    elif user_role == "student":
+        markup.keyboard = [
+            [types.KeyboardButton(text="🔄 Старт"),
+             types.KeyboardButton(text="👨‍🏫 Мой преподаватель")],
+            [types.KeyboardButton(text="📄 Подать заявление"),
+             types.KeyboardButton(text="📝 Мои задания")],
+            [types.KeyboardButton(text="📋 Посмотреть расписание")]
+        ]
+        await message.answer("🎓 Добро пожаловать, студент!", reply_markup=markup)
+        
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-
+     user_role = await get_user_role_by_username(message.from_user.username)
+    
+    if user_role is None:
+        await handle_first_login(message, state)  # Передаём state
+        return
+        
     conn = None
     try:
         conn = get_db_connection()
