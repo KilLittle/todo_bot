@@ -5,7 +5,7 @@
 ## ⚙️ Процесс
 Диаграммы: 
 - [IDEF0](https://drive.google.com/file/d/1mdOV-tPyFfxxlt1a6NRojqtBLCncWilJ/view)
-- [BPMN](https://drive.google.com/file/d/1VvfkCW-AGezMCRecZoc_Tdq6jnWoD_Tk/view)
+- [BPMN](https://drive.google.com/file/d/1Rd2dmvYch0zUvfwW_FhyeIlx7w5Qq7O3/view?usp=sharing)
 ---
 ## 📌 Основные функции
 
